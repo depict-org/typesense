@@ -3827,7 +3827,7 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
             search_cutoff = search_cutoff || filter_result_iterator_no_groups->validity == filter_result_iterator_t::timed_out;
 
             std::vector<uint32_t> nearest_ids;
-            std::vector<uint32_t> eval_filter_indexes;
+            eval_filter_indexes_t eval_filter_indexes;
 
             std::vector<group_by_field_it_t> group_by_field_it_vec;
             if (group_limit != 0) {
@@ -4297,7 +4297,7 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
             }
 
             std::vector<uint32_t> vec_search_ids;  // list of IDs found only in vector search
-            std::vector<uint32_t> eval_filter_indexes;
+            eval_filter_indexes_t eval_filter_indexes;
 
             std::vector<group_by_field_it_t> group_by_field_it_vec;
             if (group_limit != 0) {
@@ -5572,7 +5572,7 @@ Option<bool> Index::search_across_fields(const std::vector<token_t>& query_token
     get_field_token_its(num_search_fields, query_suggestion, token_its, expanded_plists, query_tokens, the_fields);
 
     std::vector<uint32_t> result_ids;
-    std::vector<uint32_t> eval_filter_indexes;
+    eval_filter_indexes_t eval_filter_indexes;
     Option<bool> status(true);
 
     result_iter_state_t istate(excluded_result_ids, excluded_result_ids_size, filter_result_iterator);
@@ -5767,7 +5767,7 @@ Option<bool> Index::compute_sort_scores(const std::vector<sort_by>& sort_fields,
                                         std::array<spp::sparse_hash_map<uint32_t, int64_t, Hasher32>*, 3> field_values,
                                         const std::vector<size_t>& geopoint_indices,
                                         uint32_t seq_id, const std::map<basic_string<char>, reference_filter_result_t>& references,
-                                        std::vector<uint32_t>& filter_indexes, int64_t max_field_match_score, int64_t* scores,
+                                        eval_filter_indexes_t& filter_indexes, int64_t max_field_match_score, int64_t* scores,
                                         int64_t& match_score_index, float vector_distance) const {
 
     int64_t geopoint_distances[3];
@@ -5875,7 +5875,7 @@ Option<bool> Index::compute_sort_scores(const std::vector<sort_by>& sort_fields,
             if (is_reference_sort) {
                 // Both ref_seq_ids and eval.eval_ids_vec will be ordered. So we can take advantage of binary search
                 // and break early if there are no matches.
-                filter_indexes = std::vector<uint32_t>(ref_seq_ids.size(), 0);
+                auto& ref_filter_indexes = filter_indexes.reset(i, ref_seq_ids.size());
 
                 // Trying to find a match for every reference doc. The score will be the value of eval expression where
                 // we find the first match.
@@ -5885,7 +5885,7 @@ Option<bool> Index::compute_sort_scores(const std::vector<sort_by>& sort_fields,
                     for (eval_index = 0; eval_index < count; eval_index++) {
                         auto const& eval_ids = eval.eval_ids_vec[eval_index];
                         auto const& eval_ids_count = eval.eval_ids_count_vec[eval_index];
-                        auto& filter_index = filter_indexes[j];
+                        auto& filter_index = ref_filter_indexes[j];
 
                         if (filter_index >= eval_ids_count) {
                             // When all the indexes of eval.eval_ids_vec have reached to the end, we can stop looking.
@@ -5910,15 +5910,13 @@ Option<bool> Index::compute_sort_scores(const std::vector<sort_by>& sort_fields,
                     }
                 }
             } else {
-                if (filter_indexes.empty()) {
-                    filter_indexes = std::vector<uint32_t>(count, 0);
-                }
+                auto& eval_indexes = filter_indexes.get(i, count);
 
                 for (; eval_index < count; eval_index++) {
                     auto const& eval_ids = eval.eval_ids_vec[eval_index];
                     auto const& eval_ids_count = eval.eval_ids_count_vec[eval_index];
 
-                    auto& filter_index = filter_indexes[eval_index];
+                    auto& filter_index = eval_indexes[eval_index];
                     if (filter_index >= eval_ids_count) {
                         continue;
                     }
@@ -6139,7 +6137,7 @@ Option<bool> Index::do_phrase_search(const size_t num_search_fields, const std::
     all_result_ids_len = filter_result_iterator->to_filter_id_array(all_result_ids);
     filter_result_iterator->reset();
 
-    std::vector<uint32_t> eval_filter_indexes;
+    eval_filter_indexes_t eval_filter_indexes;
 
     std::vector<group_by_field_it_t> group_by_field_it_vec;
     if (group_limit != 0) {
@@ -6312,7 +6310,7 @@ Option<bool> Index::do_infix_search(const size_t num_search_fields, const std::v
                 }
 
                 bool field_is_array = search_schema.at(the_fields[field_id].name).is_array();
-                std::vector<uint32_t> eval_filter_indexes;
+                eval_filter_indexes_t eval_filter_indexes;
                 for(size_t i = 0; i < raw_infix_ids_length; i++) {
                     auto seq_id = raw_infix_ids[i];
                     std::map<std::string, reference_filter_result_t> references;
@@ -6807,7 +6805,7 @@ Option<bool> Index::search_wildcard(const std::vector<sort_by>& sort_fields, Top
             search_stop_us = parent_search_stop_ms;
             search_cutoff = false;
 
-            std::vector<uint32_t> filter_indexes;
+            eval_filter_indexes_t filter_indexes;
 
             std::vector<group_by_field_it_t> group_by_field_it_vec;
             if (group_limit != 0) {
@@ -9270,7 +9268,7 @@ Option<bool> Index::process_ref_include_fields_sort(std::vector<sort_by>& sort_f
         return populate_op;
     }
 
-    std::vector<uint32_t> eval_filter_indexes;
+    eval_filter_indexes_t eval_filter_indexes;
     std::map<basic_string<char>, reference_filter_result_t> references;
     Topster<KV> topster(limit);
 
