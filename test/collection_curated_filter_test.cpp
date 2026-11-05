@@ -26,9 +26,9 @@ protected:
             {"name":"rank","type":"int32"}]})"_json;
         auto created = manager.create_collection(schema);
         ASSERT_TRUE(created.ok()) << created.error();
-        for (size_t i = 0; i < 64; ++i) {
+        for (size_t i = 0; i < 2048; ++i) {
             nlohmann::json doc = {{"id",std::to_string(i)}, {"group","g"+std::to_string(i/2)},
-                {"stock",i%2==1}, {"market",true}, {"rank",64-i}};
+                {"stock",i%2==1}, {"market",true}, {"rank",2048-i}};
             ASSERT_TRUE(created.get()->add(doc.dump()).ok());
         }
     }
@@ -56,9 +56,13 @@ TEST_F(CollectionCuratedFilterTest, SecondGroupedPassReceivesMaterializedFilter)
         SCOPED_TRACE(lazy);
         testing_curated_second_pass_entries = 0;
         testing_curated_second_pass_unmaterialized_entries = 0;
+        std::string pins = "999999:1";
+        for (size_t i = 0; i < 1024; ++i) {
+            pins += "," + std::to_string(i) + ":" + std::to_string(i/2+1);
+        }
         auto result = search({{"group_by","group"},{"group_limit","1"},
             {"filter_by","stock:true && market:true"},{"filter_curated_hits","true"},
-            {"pinned_hits","0:1,1:1,2:2,3:2,999:3,4:3,5:3"},
+            {"pinned_hits",pins},
             {"per_page","3"},{"enable_lazy_filter",lazy}});
         ASSERT_TRUE(result.contains("grouped_hits"));
         ASSERT_FALSE(result["search_cutoff"].get<bool>());
@@ -100,4 +104,27 @@ TEST_F(CollectionCuratedFilterTest, UngroupedFilteringKeepsPinOrder) {
     EXPECT_EQ("3",result["hits"][0]["document"]["id"]);
     EXPECT_EQ("1",result["hits"][1]["document"]["id"]);
     EXPECT_EQ(0,testing_curated_second_pass_entries);
+}
+
+TEST_F(CollectionCuratedFilterTest, ThresholdCountsResolvedPins) {
+    for (const auto& lazy : {"false", "true"}) {
+        for (size_t count : {6, 1023, 1024}) {
+            SCOPED_TRACE(std::string(lazy) + ":" + std::to_string(count));
+            std::string pins = "999999:1";
+            for (size_t i = 0; i < count; ++i) {
+                pins += "," + std::to_string(i) + ":" + std::to_string(i/2+1);
+            }
+            testing_curated_second_pass_entries = 0;
+            testing_curated_second_pass_unmaterialized_entries = 0;
+            auto result = search({{"group_by","group"},{"group_limit","1"},
+                {"filter_by","stock:true && market:true"},{"filter_curated_hits","true"},
+                {"pinned_hits",pins},{"per_page","3"},{"enable_lazy_filter",lazy}});
+            ASSERT_EQ(3, result["grouped_hits"].size());
+            EXPECT_EQ("1", result["grouped_hits"][0]["hits"][0]["document"]["id"]);
+            EXPECT_EQ("3", result["grouped_hits"][1]["hits"][0]["document"]["id"]);
+            EXPECT_EQ("5", result["grouped_hits"][2]["hits"][0]["document"]["id"]);
+            EXPECT_EQ(count >= 1024 ? 1 : 0, testing_curated_second_pass_entries);
+            EXPECT_EQ(0, testing_curated_second_pass_unmaterialized_entries);
+        }
+    }
 }

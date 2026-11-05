@@ -14,6 +14,7 @@
 #include "posting.h"
 #include "collection_manager.h"
 #include <variant>
+#include <functional>
 
 void copy_references_helper(const std::map<std::string, reference_filter_result_t>* from,
                             std::map<std::string, reference_filter_result_t>*& to, const uint32_t& count) {
@@ -2781,6 +2782,89 @@ void filter_result_iterator_t::add_phrase_ids(filter_result_iterator_t*& fit,
     fit = root_iterator;
 }
 
+curated_filter_prefix_t filter_result_iterator_t::compute_for_curation(
+        const std::vector<uint32_t>& sorted_ids) {
+    curated_filter_prefix_t prefix;
+    if (is_filter_result_initialized || validity != valid) {
+        return prefix;
+    }
+
+    // Retain the parent's first ordinary deadline checkpoint before speculative
+    // work. If that work times out, curation resumes this exact lazy traversal,
+    // reusing the checked prefix rather than sampling or admitting it twice.
+    const size_t checkpoint = timeout_info == nullptr ? 0 :
+            function_call_modulo - timeout_info->function_call_counter % function_call_modulo;
+    while (prefix.checked_ids < std::min(checkpoint, sorted_ids.size())) {
+        const auto id = sorted_ids[prefix.checked_ids++];
+        const auto result = is_valid(id);
+        if (result == 1) {
+            prefix.matched_ids.insert(id);
+        } else if (result == -1) {
+            return prefix;
+        }
+    }
+
+    // Copy existing materialized children (including reference results), and
+    // reinitialize only lazy leaves with their own candidate limits. This keeps
+    // query-local results and parameters instead of rerunning the whole filter.
+    std::function<std::unique_ptr<filter_result_iterator_t>(const filter_result_iterator_t*)> clone =
+            [&](const filter_result_iterator_t* source) {
+        auto copy = std::make_unique<filter_result_iterator_t>();
+        copy->collection_name = source->collection_name;
+        copy->index = source->index;
+        copy->filter_node = source->filter_node;
+        copy->max_filter_by_candidates = source->max_filter_by_candidates;
+        copy->status = Option<bool>(source->status);
+        copy->approx_filter_ids_length = source->approx_filter_ids_length;
+        if (source->is_filter_result_initialized) {
+            copy->filter_result = source->filter_result;
+            copy->is_filter_result_initialized = true;
+            copy->reset(true);
+        } else if (source->filter_node != nullptr && source->filter_node->isOperator) {
+            copy->left_it = clone(source->left_it).release();
+            copy->right_it = clone(source->right_it).release();
+        } else if (source->filter_node != nullptr) {
+            copy->init(true, false);
+        } else {
+            copy->validity = source->validity;
+        }
+        return copy;
+    };
+    auto candidate_owner = clone(this);
+    auto& candidate = *candidate_owner;
+    if (!candidate.init_status().ok()) {
+        return prefix;
+    }
+    if (timeout_info != nullptr) {
+        candidate.timeout_info = std::make_unique<filter_result_iterator_timeout_info>(*timeout_info);
+    }
+    candidate.compute_iterators();
+    if (candidate.validity == timed_out) {
+        prefix.materialization_timed_out = true;
+        return prefix;
+    }
+    if (!candidate.is_filter_result_initialized) {
+        return prefix;
+    }
+
+    // Adopt only the completed result. Original timeout counters retain the
+    // parent's pin-admission cadence; all lazy buffers remain request-owned.
+    filter_result = std::move(candidate.filter_result);
+    is_filter_result_initialized = true;
+    result_index = candidate.result_index;
+    seq_id = candidate.seq_id;
+    approx_filter_ids_length = candidate.approx_filter_ids_length;
+    // Keep the reference state of the cached prefix. Curation skips that
+    // prefix, including when it covers every pin; reset() later restores the
+    // materialized result's first reference for the ordinary search path.
+    validity = candidate.validity;
+    delete left_it;
+    left_it = nullptr;
+    delete right_it;
+    right_it = nullptr;
+    return prefix;
+}
+
 void filter_result_iterator_t::compute_iterators() {
     if (filter_node == nullptr) {
         validity = invalid;
@@ -2890,9 +2974,9 @@ void filter_result_iterator_t::compute_iterators() {
             auto const& is_not_equals_comparator = numerical_not_iterator_index.count(i) != 0;
 
             if (lists.empty() && is_not_equals_comparator) {
-                auto all_ids = index->seq_ids->uncompress();
-                std::copy(all_ids, all_ids + index->seq_ids->num_ids(), std::back_inserter(f_id_buff));
-                delete[] all_ids;
+                std::unique_ptr<uint32_t[]> all_ids(index->seq_ids->uncompress());
+                std::copy(all_ids.get(), all_ids.get() + index->seq_ids->num_ids(),
+                          std::back_inserter(f_id_buff));
 
                 continue;
             }
@@ -2902,12 +2986,14 @@ void filter_result_iterator_t::compute_iterators() {
                     std::vector<uint32_t> equals_ids;
                     list->uncompress(equals_ids);
 
+                    std::unique_ptr<uint32_t[]> all_ids(index->seq_ids->uncompress());
                     uint32_t* not_equals_ids = nullptr;
-                    auto const not_equals_ids_len = ArrayUtils::exclude_scalar(index->seq_ids->uncompress(), index->seq_ids->num_ids(),
-                                                                               &equals_ids[0], equals_ids.size(),
+                    auto const not_equals_ids_len = ArrayUtils::exclude_scalar(all_ids.get(), index->seq_ids->num_ids(),
+                                                                               equals_ids.data(), equals_ids.size(),
                                                                                &not_equals_ids);
-
-                    std::copy(not_equals_ids, not_equals_ids + not_equals_ids_len, std::back_inserter(f_id_buff));
+                    std::unique_ptr<uint32_t[]> owned_not_equals_ids(not_equals_ids);
+                    std::copy(owned_not_equals_ids.get(), owned_not_equals_ids.get() + not_equals_ids_len,
+                              std::back_inserter(f_id_buff));
                 } else {
                     list->uncompress(f_id_buff);
                 }

@@ -204,7 +204,12 @@ cc_test(
        ":asan_mode": ["-fsanitize=address", "-fuse-ld=lld"],
        "//conditions:default": []
     }) +  select({
-       "@platforms//os:linux": ["-fuse-ld=lld"],
+       "@platforms//os:linux": [
+           "-fuse-ld=lld", "-rdynamic",
+           "-Wl,--wrap=_ZNSt6chrono3_V212system_clock3nowEv",
+           "-Wl,--wrap=_ZN24filter_result_iterator_t17compute_iteratorsEv",
+           "-Wl,--wrap=_Znam", "-Wl,--wrap=_ZdaPv", "-Wl,--wrap=_ZdaPvm",
+       ],
        "//conditions:default": [],
    })
 )
