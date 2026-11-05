@@ -239,9 +239,8 @@ target_link_libraries(search ${CORE_LIBS})
 target_link_libraries(benchmark ${CORE_LIBS})
 target_link_libraries(typesense-test ${CORE_LIBS} gtest gtest_main)
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_options(typesense-test PRIVATE -rdynamic
+    target_link_options(typesense-test PRIVATE
         -Wl,--wrap=_ZNSt6chrono3_V212system_clock3nowEv
-        -Wl,--wrap=_ZN24filter_result_iterator_t17compute_iteratorsEv
         -Wl,--wrap=_Znam -Wl,--wrap=_ZdaPv -Wl,--wrap=_ZdaPvm)
 endif()
 

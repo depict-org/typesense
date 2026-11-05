@@ -1154,18 +1154,6 @@ public:
                              std::vector<uint32_t>& included_ids_vec,
                              bool is_group_by_first_pass,
                              std::set<uint32_t>& group_by_missing_value_ids) const;
-    void process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>& included_ids,
-                             const std::vector<uint32_t>& excluded_ids,
-                             const std::vector<std::string>& group_by_fields,
-                             const size_t group_limit, const bool group_missing_values, const bool filter_curated_hits,
-                             filter_result_iterator_t* const filter_result_iterator,
-                             std::set<uint32_t>& curated_ids,
-                             std::map<size_t, std::map<size_t, uint32_t>>& included_ids_map,
-                             std::vector<uint32_t>& included_ids_vec,
-                             bool is_group_by_first_pass,
-                             std::set<uint32_t>& group_by_missing_value_ids,
-                             const curated_filter_prefix_t* prefix) const;
-    
     int64_t get_doc_val_from_sort_index(sort_index_iterator it, uint32_t doc_seq_id) const;
 
     Option<bool> seq_ids_outside_top_k(const std::string& field_name, size_t k,

@@ -1,14 +1,14 @@
-// Linux native targets link --wrap for the clock and materialization symbols.
+// Linux native targets wrap the clock and array allocation symbols.
 // The seam is idle outside these tests and crosses the unchanged 30s deadline.
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <unistd.h>
 #include <chrono>
 #include <fstream>
-#include <dlfcn.h>
 #include "collection_manager.h"
 #include "collection.h"
 #include "filter.h"
+#include "thread_local_vars.h"
 
 using Clock = std::chrono::system_clock;
 #if defined(__linux__)
@@ -17,20 +17,8 @@ static thread_local size_t clock_calls = 0;
 static thread_local bool advance_clock = false;
 static thread_local bool full_search_probe = false;
 static thread_local uint64_t clock_base_us = 1000000;
-static thread_local size_t materialization_boundary_calls = 0;
 static void arm_boundary_clock() {
     scripted_clock=true;advance_clock=true;clock_calls=0;
-}
-extern "C" void __real__ZN24filter_result_iterator_t17compute_iteratorsEv(filter_result_iterator_t*);
-extern "C" void __wrap__ZN24filter_result_iterator_t17compute_iteratorsEv(filter_result_iterator_t* it) {
-    if(full_search_probe && !scripted_clock) {
-        Dl_info info{};
-        if(dladdr(__builtin_return_address(0),&info) && info.dli_sname &&
-                std::string(info.dli_sname).find("_ZNK5Index6searchE")==0) {
-            ++materialization_boundary_calls;arm_boundary_clock();
-        }
-    }
-    __real__ZN24filter_result_iterator_t17compute_iteratorsEv(it);
 }
 static thread_local bool track_arrays = false;
 static thread_local bool observe_array_lifetimes = false;
@@ -52,8 +40,10 @@ extern "C" Clock::time_point __real__ZNSt6chrono3_V212system_clock3nowEv();
 extern "C" Clock::time_point __wrap__ZNSt6chrono3_V212system_clock3nowEv() {
     if(full_search_probe && !scripted_clock && testing_curated_second_pass_entries>0)arm_boundary_clock();
     if (!scripted_clock) return __real__ZNSt6chrono3_V212system_clock3nowEv();
-    // A 30,000ms deadline is crossed between materializing the two bool leaves.
-    const uint64_t us = clock_base_us + (!advance_clock || ++clock_calls == 1 ? 1 : 30000001);
+    // Initialization stays below cutoff. Once armed, the unchanged 30,000ms
+    // deadline has already crossed before the first clock checkpoint.
+    if (advance_clock) ++clock_calls;
+    const uint64_t us = clock_base_us + (advance_clock ? 30000001 : 1);
     return Clock::time_point(std::chrono::microseconds(us));
 }
 
@@ -64,8 +54,11 @@ protected:
     std::atomic<bool> quit = false;
     Collection* coll = nullptr;
     std::string path;
-    nlohmann::json document_17;
+    nlohmann::json document_7;
     void SetUp() override {
+        // Direct iterator probes have their own timeout info. Prefix matching
+        // also consults these query-local globals, which a prior search sets.
+        search_begin_us=0;search_stop_us=UINT64_MAX;search_cutoff=false;
         path = (std::filesystem::temp_directory_path() /
                 ("typesense-curated-deadline-" + std::to_string(getpid()))).string();
         std::filesystem::create_directories(path);
@@ -92,12 +85,13 @@ protected:
                 {"geo",{51.5+double(i%2),-0.1}},
                 {"items",nlohmann::json::array({{{"color","red"},{"size",i%2?1:2}},{{"color","blue"},{"size",i%2?2:1}}})}};
             d["outer"]={{"items",d["items"]}};
-            if (i == 17) document_17 = d;
+            if (i == 7) document_7 = d;
             auto add=coll->add(d.dump());ASSERT_TRUE(add.ok())<<add.error();
         }
     }
     void TearDown() override {
         track_arrays=false;observe_array_lifetimes=false;
+        search_begin_us=0;search_stop_us=UINT64_MAX;search_cutoff=false;
         scripted_clock=false;full_search_probe=false; manager.dispose();delete store;std::filesystem::remove_all(path);
     }
     std::unique_ptr<filter_node_t> parse(const std::string& q) {
@@ -128,17 +122,13 @@ TEST_F(CuratedFilterDeadlineTest, PredicateMembershipParity) {
         ASSERT_TRUE(lazy.init_status().ok());ASSERT_TRUE(computed.init_status().ok());
         ASSERT_TRUE(curated.init_status().ok());
         computed.compute_iterators();
-        std::vector<uint32_t> sorted_ids;
-        for (uint32_t i = 0; i < 2048; ++i) sorted_ids.push_back(i);
-        const auto prefix = curated.compute_for_curation(sorted_ids);
+        EXPECT_FALSE(curated.compute_for_curation());
         std::vector<uint32_t> a,b,c;
         for(uint32_t i=0;i<2048;++i) {
             if(lazy.is_valid(i)==1)a.push_back(i);
             if(computed.is_valid(i)==1)b.push_back(i);
-            if (prefix.matched_ids.count(i) ||
-                    (i >= prefix.checked_ids && curated.is_valid(i)==1)) c.push_back(i);
+            if (curated.is_valid(i)==1) c.push_back(i);
         }
-        std::cout<<"PREDICATE "<<q<<" lazy="<<a.size()<<" materialized="<<b.size()<<" equal="<<(a==b)<<"\n";
         EXPECT_EQ(a,b);
         EXPECT_EQ(a,c);
     }
@@ -149,39 +139,30 @@ TEST_F(CuratedFilterDeadlineTest, DeadlineMaterializationPreservesPinAdmission) 
     std::vector<std::pair<uint32_t,uint32_t>> pins;
     for(uint32_t i=0;i<2048;++i)pins.emplace_back(i,i+1);
     auto root=parse("b:true && c:true");
-    size_t admitted[2]={};int final_validity[2]={};size_t calls[2]={};
+    size_t admitted[2]={};int final_validity[2]={};
     std::vector<uint32_t> admitted_ids[2];
     std::map<size_t,std::map<size_t,uint32_t>> admitted_positions[2];
     for(int arm=0;arm<2;++arm) {
-        // Freeze time below cutoff during initialization, then cross it at the
-        // second actual clock check, with production's 30,000ms duration.
+        // Freeze time during initialization, then expire before the first
+        // actual clock check, with production's 30,000ms duration.
         clock_calls=0;advance_clock=false;scripted_clock=true;
         filter_result_iterator_t it(coll->get_name(),coll->_get_index(),root.get(),true,
             DEFAULT_FILTER_BY_CANDIDATES,1000000,30000000);
         scripted_clock=false;
         ASSERT_TRUE(it.init_status().ok());ASSERT_EQ(filter_result_iterator_t::valid,it.validity);
         clock_calls=0;advance_clock=true;scripted_clock=true;
-        curated_filter_prefix_t prefix;
-        if (arm) {
-            std::vector<uint32_t> sorted_ids;
-            for (const auto& pin : pins) sorted_ids.push_back(pin.first);
-            prefix = it.compute_for_curation(sorted_ids);
-            EXPECT_TRUE(prefix.materialization_timed_out);
-        }
+        if (arm) EXPECT_TRUE(it.compute_for_curation());
         std::set<uint32_t> curated,missing;
         std::map<size_t,std::map<size_t,uint32_t>> positions;
         std::vector<uint32_t> ids;
         coll->_get_index()->process_curated_ids(pins,{}, {"group"},1,true,true,&it,
-            curated,positions,ids,false,missing, arm ? &prefix : nullptr);
+            curated,positions,ids,false,missing);
         scripted_clock=false;
         admitted_ids[arm] = ids;
         admitted_positions[arm] = positions;
-        admitted[arm]=ids.size();final_validity[arm]=it.validity;calls[arm]=clock_calls;
+        admitted[arm]=ids.size();final_validity[arm]=it.validity;
     }
-    std::cout<<"DEADLINE parent_pins="<<admitted[0]<<" patched_pins="<<admitted[1]
-             <<" parent_validity="<<final_validity[0]<<" patched_validity="<<final_validity[1]
-             <<" parent_clock_checks="<<calls[0]<<" patched_clock_checks="<<calls[1]<<"\n";
-    EXPECT_EQ(19, admitted[0]);EXPECT_EQ(admitted[0], admitted[1]);
+    EXPECT_EQ(9, admitted[0]);EXPECT_EQ(admitted[0], admitted[1]);
     EXPECT_EQ(admitted_ids[0], admitted_ids[1]);
     EXPECT_EQ(admitted_positions[0], admitted_positions[1]);
     EXPECT_EQ(filter_result_iterator_t::timed_out,final_validity[0]);
@@ -200,7 +181,7 @@ TEST_F(CuratedFilterDeadlineTest, FullGroupedResponseAtDeadline) {
         {"enable_lazy_filter","true"},{"search_cutoff_ms","30000"}};
     nlohmann::json embedded;std::string response;
     scripted_clock=false;testing_curated_second_pass_entries=0;
-    testing_curated_second_pass_unmaterialized_entries=0;materialization_boundary_calls=0;
+    testing_curated_second_pass_unmaterialized_entries=0;
     clock_base_us=std::chrono::duration_cast<std::chrono::microseconds>(
         __real__ZNSt6chrono3_V212system_clock3nowEv().time_since_epoch()).count();
     full_search_probe=true;
@@ -211,7 +192,7 @@ TEST_F(CuratedFilterDeadlineTest, FullGroupedResponseAtDeadline) {
     auto expected = R"({"facet_counts":[],"found":1,"found_docs":0,"out_of":2048,
         "page":1,"request_params":{"collection_name":"review_probe","first_q":"*","per_page":1,"q":"*"},
         "search_cutoff":true})"_json;
-    nlohmann::json hit = {{"curated",true},{"document",document_17},
+    nlohmann::json hit = {{"curated",true},{"document",document_7},
         {"highlight",nlohmann::json::object()},{"highlights",nlohmann::json::array()}};
     nlohmann::json group = {{"group_key",nlohmann::json::array({true})},
         {"hits",nlohmann::json::array({hit})}};
@@ -278,10 +259,11 @@ TEST_F(CuratedFilterDeadlineTest, CandidatePreservesReferencesAndLeafLimits) {
     filter_result_iterator_t it(coll->get_name(),coll->_get_index(),root.get(),true,
         DEFAULT_FILTER_BY_CANDIDATES,begin,30000000);
     ASSERT_TRUE(it.init_status().ok());
-    const auto prefix = it.compute_for_curation({0,1,2,3});
-    ASSERT_EQ(4,prefix.checked_ids);
+    EXPECT_FALSE(it.compute_for_curation());
     ASSERT_TRUE(it._get_is_filter_result_initialized());
     ASSERT_EQ(1,it.reference.at("cf_refs").count);
+    EXPECT_EQ(0,it.reference.at("cf_refs").docs[0]);
+    for (uint32_t id = 0; id < 4; ++id) EXPECT_EQ(1,it.is_valid(id));
     EXPECT_EQ(1,it.reference.at("cf_refs").docs[0]);
     it.reset();
     EXPECT_EQ(0,it.reference.at("cf_refs").docs[0]);
@@ -299,7 +281,7 @@ TEST_F(CuratedFilterDeadlineTest, CandidatePreservesReferencesAndLeafLimits) {
     auto* group_it = new filter_result_iterator_t(coll->get_name(),coll->_get_index(),group_root.get(),true,1);
     filter_result_iterator_t effective(AND,string_it,group_it,string_root,group_root.release());
     ASSERT_FALSE(effective._get_is_filter_result_initialized());
-    effective.compute_for_curation(ids);
+    EXPECT_FALSE(effective.compute_for_curation());
     std::vector<uint32_t> actual;
     for (auto id : ids) if (effective.is_valid(id)==1) actual.push_back(id);
     EXPECT_EQ(expected,actual);

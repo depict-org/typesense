@@ -3565,10 +3565,9 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
     std::map<size_t, std::map<size_t, uint32_t>> included_ids_map;  // outer pos => inner pos => list of IDs
     std::vector<uint32_t> included_ids_vec;
 
-    curated_filter_prefix_t curated_prefix;
-    const bool materialize_curated_filter = !is_group_by_first_pass && group_limit != 0 &&
-            filter_curated_hits && included_ids.size() >= 1024 && filter_result_iterator->is_filter_provided();
-    if (materialize_curated_filter) {
+    bool curated_materialization_timed_out = false;
+    if (!is_group_by_first_pass && group_limit != 0 && filter_curated_hits &&
+            included_ids.size() >= 1024 && filter_result_iterator->is_filter_provided()) {
         auto filter_init_op = filter_result_iterator->init_status();
         if (!filter_init_op.ok()) {
             return filter_init_op;
@@ -3576,31 +3575,20 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
 #ifdef TEST_BUILD
         ++testing_curated_second_pass_entries;
 #endif
-        std::vector<uint32_t> sorted_ids;
-        sorted_ids.reserve(included_ids.size());
-        for (const auto& pin : included_ids) {
-            sorted_ids.push_back(pin.first);
-        }
-        std::sort(sorted_ids.begin(), sorted_ids.end());
-        curated_prefix = filter_result_iterator->compute_for_curation(sorted_ids);
+        curated_materialization_timed_out = filter_result_iterator->compute_for_curation();
 #ifdef TEST_BUILD
         if (filter_result_iterator->validity == filter_result_iterator_t::valid &&
-                !curated_prefix.materialization_timed_out &&
+                !curated_materialization_timed_out &&
                 !filter_result_iterator->_get_is_filter_result_initialized()) {
             ++testing_curated_second_pass_unmaterialized_entries;
         }
 #endif
-        process_curated_ids(included_ids, excluded_ids, group_by_fields, group_limit,
-                            group_missing_values, filter_curated_hits,
-                            filter_result_iterator, curated_ids, included_ids_map,
-                            included_ids_vec, is_group_by_first_pass, group_by_missing_value_ids, &curated_prefix);
-        search_cutoff = search_cutoff || curated_prefix.materialization_timed_out;
-    } else {
-        process_curated_ids(included_ids, excluded_ids, group_by_fields, group_limit,
-                            group_missing_values, filter_curated_hits,
-                            filter_result_iterator, curated_ids, included_ids_map,
-                            included_ids_vec, is_group_by_first_pass, group_by_missing_value_ids);
     }
+    process_curated_ids(included_ids, excluded_ids, group_by_fields, group_limit,
+                        group_missing_values, filter_curated_hits,
+                        filter_result_iterator, curated_ids, included_ids_map,
+                        included_ids_vec, is_group_by_first_pass, group_by_missing_value_ids);
+    search_cutoff = search_cutoff || curated_materialization_timed_out;
     collate_included_ids({}, included_ids_map, curated_topster, group_limit,
                          group_by_fields, group_missing_values, searched_queries, is_group_by_first_pass,
                          group_by_missing_value_ids, filter_result_iterator->reference);
@@ -4804,23 +4792,6 @@ void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>
                                 std::vector<uint32_t>& included_ids_vec,
                                 bool is_group_by_first_pass,
                                 std::set<uint32_t>& group_by_missing_value_ids) const {
-    process_curated_ids(included_ids, excluded_ids, group_by_fields, group_limit,
-                        group_missing_values, filter_curated_hits, filter_result_iterator,
-                        curated_ids, included_ids_map, included_ids_vec, is_group_by_first_pass,
-                        group_by_missing_value_ids, nullptr);
-}
-
-void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>& included_ids,
-                                const std::vector<uint32_t>& excluded_ids,
-                                const std::vector<std::string>& group_by_fields, const size_t group_limit,
-                                const bool group_missing_values,
-                                const bool filter_curated_hits, filter_result_iterator_t* const filter_result_iterator,
-                                std::set<uint32_t>& curated_ids,
-                                std::map<size_t, std::map<size_t, uint32_t>>& included_ids_map,
-                                std::vector<uint32_t>& included_ids_vec,
-                                bool is_group_by_first_pass,
-                                std::set<uint32_t>& group_by_missing_value_ids,
-                                const curated_filter_prefix_t* prefix) const {
 
     for(const auto& seq_id_pos: included_ids) {
         included_ids_vec.push_back(seq_id_pos.first);
@@ -4847,22 +4818,16 @@ void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>
 
     if(!filter_result_iterator->is_filter_provided() || !filter_curated_hits) {
         included_ids_set.insert(included_ids_vec.begin(), included_ids_vec.end());
-    } else {
-        if (prefix != nullptr) {
-            included_ids_set = prefix->matched_ids;
-        }
-        if (filter_result_iterator->validity == filter_result_iterator_t::valid) {
-            for (size_t i = prefix == nullptr ? 0 : prefix->checked_ids; i < included_ids_vec.size(); ++i) {
-                const auto included_id = included_ids_vec[i];
-                auto result = filter_result_iterator->is_valid(included_id);
+    } else if(filter_result_iterator->validity == filter_result_iterator_t::valid) {
+        for (const auto &included_id: included_ids_vec) {
+            auto result = filter_result_iterator->is_valid(included_id);
 
-                if (result == -1) {
-                    break;
-                }
+            if (result == -1) {
+                break;
+            }
 
-                if (result == 1) {
-                    included_ids_set.insert(included_id);
-                }
+            if (result == 1) {
+                included_ids_set.insert(included_id);
             }
         }
     }

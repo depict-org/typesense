@@ -2782,26 +2782,9 @@ void filter_result_iterator_t::add_phrase_ids(filter_result_iterator_t*& fit,
     fit = root_iterator;
 }
 
-curated_filter_prefix_t filter_result_iterator_t::compute_for_curation(
-        const std::vector<uint32_t>& sorted_ids) {
-    curated_filter_prefix_t prefix;
+bool filter_result_iterator_t::compute_for_curation() {
     if (is_filter_result_initialized || validity != valid) {
-        return prefix;
-    }
-
-    // Retain the parent's first ordinary deadline checkpoint before speculative
-    // work. If that work times out, curation resumes this exact lazy traversal,
-    // reusing the checked prefix rather than sampling or admitting it twice.
-    const size_t checkpoint = timeout_info == nullptr ? 0 :
-            function_call_modulo - timeout_info->function_call_counter % function_call_modulo;
-    while (prefix.checked_ids < std::min(checkpoint, sorted_ids.size())) {
-        const auto id = sorted_ids[prefix.checked_ids++];
-        const auto result = is_valid(id);
-        if (result == 1) {
-            prefix.matched_ids.insert(id);
-        } else if (result == -1) {
-            return prefix;
-        }
+        return false;
     }
 
     // Copy existing materialized children (including reference results), and
@@ -2833,36 +2816,32 @@ curated_filter_prefix_t filter_result_iterator_t::compute_for_curation(
     auto candidate_owner = clone(this);
     auto& candidate = *candidate_owner;
     if (!candidate.init_status().ok()) {
-        return prefix;
+        return false;
     }
     if (timeout_info != nullptr) {
         candidate.timeout_info = std::make_unique<filter_result_iterator_timeout_info>(*timeout_info);
     }
     candidate.compute_iterators();
     if (candidate.validity == timed_out) {
-        prefix.materialization_timed_out = true;
-        return prefix;
+        return true;
     }
     if (!candidate.is_filter_result_initialized) {
-        return prefix;
+        return false;
     }
 
-    // Adopt only the completed result. Original timeout counters retain the
-    // parent's pin-admission cadence; all lazy buffers remain request-owned.
+    // Adopt only a completed result. A timeout leaves the original lazy cursor
+    // and its deadline counter untouched for the parent's per-pin traversal.
     filter_result = std::move(candidate.filter_result);
     is_filter_result_initialized = true;
     result_index = candidate.result_index;
     seq_id = candidate.seq_id;
     approx_filter_ids_length = candidate.approx_filter_ids_length;
-    // Keep the reference state of the cached prefix. Curation skips that
-    // prefix, including when it covers every pin; reset() later restores the
-    // materialized result's first reference for the ordinary search path.
     validity = candidate.validity;
     delete left_it;
     left_it = nullptr;
     delete right_it;
     right_it = nullptr;
-    return prefix;
+    return false;
 }
 
 void filter_result_iterator_t::compute_iterators() {

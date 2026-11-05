@@ -2,7 +2,6 @@
 
 #include <string>
 #include <map>
-#include <set>
 #include <utility>
 #include <vector>
 #include <memory>
@@ -262,12 +261,6 @@ struct filter_result_iterator_timeout_info {
     uint64_t search_stop_us = UINT64_MAX;
 };
 
-struct curated_filter_prefix_t {
-    size_t checked_ids = 0;
-    std::set<uint32_t> matched_ids;
-    bool materialization_timed_out = false;
-};
-
 class filter_result_iterator_t {
 private:
     std::string collection_name;
@@ -412,9 +405,9 @@ public:
     /// Recursively computes the result of each node and stores the final result in the root node.
     void compute_iterators();
 
-    // Preserve the lazy cursor and its deadline sampling state until a separate
-    // materialization succeeds. The returned prefix must be reused by curation.
-    curated_filter_prefix_t compute_for_curation(const std::vector<uint32_t>& sorted_ids);
+    // Adopt a completed candidate without advancing the original lazy cursor.
+    // Returns true if the candidate timed out; curation can then use that cursor.
+    bool compute_for_curation();
 
     /// Handles moving the individual iterators to id internally and checks if `id` matches the filter.
     ///
