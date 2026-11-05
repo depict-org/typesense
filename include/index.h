@@ -399,6 +399,8 @@ struct group_by_field_it_t {
 
 #ifdef TEST_BUILD
     extern bool testing_not_equals_bug;
+    extern thread_local size_t testing_curated_second_pass_entries;
+    extern thread_local size_t testing_curated_second_pass_unmaterialized_entries;
     // Observe the actual iterator entering HNSW, independently of branch setup.
     extern thread_local size_t testing_hnsw_filter_entries;
     extern thread_local size_t testing_hnsw_unmaterialized_filter_entries;

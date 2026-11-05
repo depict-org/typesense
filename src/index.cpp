@@ -3404,6 +3404,8 @@ void process_results_bruteforce(filter_result_iterator_t* filter_result_iterator
 }
 
 #ifdef TEST_BUILD
+    thread_local size_t testing_curated_second_pass_entries = 0;
+    thread_local size_t testing_curated_second_pass_unmaterialized_entries = 0;
     thread_local size_t testing_hnsw_filter_entries = 0;
     thread_local size_t testing_hnsw_unmaterialized_filter_entries = 0;
 #endif
@@ -3562,6 +3564,33 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
     std::set<uint32_t> curated_ids;
     std::map<size_t, std::map<size_t, uint32_t>> included_ids_map;  // outer pos => inner pos => list of IDs
     std::vector<uint32_t> included_ids_vec;
+
+    // Grouping creates a new effective filter after the first search pass.
+    // Resolve it once before testing each curated ID against that filter.
+    if (!is_group_by_first_pass && group_limit != 0 && filter_curated_hits &&
+            !included_ids.empty() && filter_result_iterator->is_filter_provided()) {
+        auto filter_init_op = filter_result_iterator->init_status();
+        if (!filter_init_op.ok()) {
+            return filter_init_op;
+        }
+        if (filter_result_iterator->validity == filter_result_iterator_t::valid) {
+            filter_result_iterator->compute_iterators();
+        }
+        search_cutoff = search_cutoff ||
+                        filter_result_iterator->validity == filter_result_iterator_t::timed_out;
+    }
+
+#ifdef TEST_BUILD
+    // Inspect the iterator at the actual curation boundary, independently of setup.
+    if (!is_group_by_first_pass && group_limit != 0 && filter_curated_hits &&
+            !included_ids.empty() && filter_result_iterator->is_filter_provided() &&
+            filter_result_iterator->validity == filter_result_iterator_t::valid) {
+        ++testing_curated_second_pass_entries;
+        if (!filter_result_iterator->_get_is_filter_result_initialized()) {
+            ++testing_curated_second_pass_unmaterialized_entries;
+        }
+    }
+#endif
 
     process_curated_ids(included_ids, excluded_ids, group_by_fields, group_limit, 
                         group_missing_values, filter_curated_hits,
