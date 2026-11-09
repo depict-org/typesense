@@ -88,6 +88,18 @@ TEST(EvalMembershipCache, EntryAndCopyBudgetsFallBack) {
     EXPECT_EQ(0, cache.size());
 }
 
+TEST(EvalMembershipCache, CopyRejectsEntryLargerThanRemainingBudget) {
+    eval_membership_cache_t cache(12, 8);
+    uint32_t ids[] = {1, 3};
+    cache.admit(1, 0, "n:>0", ids, 2);
+    ASSERT_TRUE(cache.can_consult("n:>0")); // Four bytes remain, below this eight-byte entry.
+    uint32_t* copy = nullptr; uint32_t count = 99;
+    EXPECT_FALSE(cache.copy(1, 0, "n:>0", copy, count));
+    EXPECT_EQ(nullptr, copy); EXPECT_EQ(99, count);
+    EXPECT_EQ(0, cache.hits());
+    delete[] copy;
+}
+
 TEST(EvalMembershipCache, BoundsCopyAndEligibilityWorkAcrossGenerations) {
     eval_membership_cache_t cache;
     std::vector<uint32_t> ids(eval_membership_cache_t::MAX_ENTRY_BYTES / sizeof(uint32_t), 1);
