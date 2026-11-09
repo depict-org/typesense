@@ -11,6 +11,16 @@
 // Owned by one ordinary multi_search invocation, accessed by its serial leg thread.
 // Values never alias the arrays owned by a leg's sort_by::eval_t.
 class eval_membership_cache_t {
+public:
+    // Bound added work as well as retained memory. Exhaustion always computes
+    // the ordinary result; these budgets are never reset by generation changes.
+    static constexpr size_t MAX_COPY_BYTES = 2 * 1024 * 1024;
+    static constexpr size_t MAX_ENTRY_BYTES = 512 * 1024;
+    static constexpr size_t MAX_LOOKUPS = 128;
+    static constexpr size_t MAX_EXPRESSION_BYTES = 16 * 1024;
+    static constexpr size_t MAX_ELIGIBILITY_NODES = 8192;
+
+private:
     struct key_t {
         uint64_t incarnation;
         std::string expression;
@@ -36,6 +46,9 @@ class eval_membership_cache_t {
     size_t retained_bytes = 0;
     size_t hit_count = 0;
     size_t admission_count = 0;
+    size_t copied_bytes = 0;
+    size_t lookups = 0;
+    size_t eligibility_nodes = 0;
     std::unordered_map<key_t, entry_t, key_hash_t> entries;
 
 public:
@@ -44,6 +57,21 @@ public:
 
     eval_membership_cache_t(const eval_membership_cache_t&) = delete;
     eval_membership_cache_t& operator=(const eval_membership_cache_t&) = delete;
+
+    bool can_consult(const std::string& expression) {
+        if (copied_bytes >= MAX_COPY_BYTES || lookups >= MAX_LOOKUPS ||
+            eligibility_nodes >= MAX_ELIGIBILITY_NODES || expression.size() > MAX_EXPRESSION_BYTES) {
+            return false;
+        }
+        ++lookups;
+        return true;
+    }
+
+    bool consume_eligibility_node() {
+        if (eligibility_nodes >= MAX_ELIGIBILITY_NODES) return false;
+        ++eligibility_nodes;
+        return true;
+    }
 
     // Called while holding this Index's shared lock, before consulting its entries.
     void prepare(uint64_t incarnation, uint64_t generation) {
@@ -61,17 +89,21 @@ public:
               uint32_t*& ids, uint32_t& count) {
         // Key construction can allocate. This optional optimization must not turn an
         // otherwise successful leg into an error when its extra allocation fails.
+        if (entries.empty() || expression.size() > MAX_EXPRESSION_BYTES) return false;
         try {
             auto it = entries.find({incarnation, expression});
             if (it == entries.end() || it->second.generation != generation) {
                 return false;
             }
             const auto& stored = it->second.ids;
+            const auto bytes = stored.size() * sizeof(uint32_t);
+            if (bytes > MAX_COPY_BYTES - copied_bytes) return false;
             std::unique_ptr<uint32_t[]> result(new uint32_t[stored.size()]);
             std::copy(stored.begin(), stored.end(), result.get());
             count = stored.size();
             ids = result.release();
             ++hit_count;
+            copied_bytes += bytes;
             return true;
         } catch (const std::bad_alloc&) {
             return false;
@@ -80,7 +112,9 @@ public:
 
     void admit(uint64_t incarnation, uint64_t generation, const std::string& expression,
                const uint32_t* ids, uint32_t count) {
-        if (entries.size() >= max_entries || expression.size() > max_bytes - retained_bytes ||
+        if (expression.size() > MAX_EXPRESSION_BYTES || count > MAX_ENTRY_BYTES / sizeof(uint32_t) ||
+            count > (MAX_COPY_BYTES - copied_bytes) / sizeof(uint32_t) ||
+            entries.size() >= max_entries || expression.size() > max_bytes - retained_bytes ||
             count > (max_bytes - retained_bytes - expression.size()) / sizeof(uint32_t)) {
             return;
         }
@@ -92,6 +126,7 @@ public:
             if (entries.emplace(key_t{incarnation, expression}, std::move(entry)).second) {
                 retained_bytes += expression.size() + size_t(count) * sizeof(uint32_t);
                 ++admission_count;
+                copied_bytes += size_t(count) * sizeof(uint32_t);
             }
         } catch (const std::bad_alloc&) {
             // Keep the leg's already materialized result; admission is optional.

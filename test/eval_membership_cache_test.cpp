@@ -90,6 +90,30 @@ TEST(EvalMembershipCache, EntryAndPayloadBudgetsFallBack) {
     EXPECT_EQ(1, cache.size());
 }
 
+TEST(EvalMembershipCache, BoundsCopyAndEligibilityWorkAcrossGenerations) {
+    eval_membership_cache_t cache;
+    std::vector<uint32_t> ids(eval_membership_cache_t::MAX_ENTRY_BYTES / sizeof(uint32_t), 1);
+    cache.admit(1, 0, "n:>0", ids.data(), ids.size());
+    for (size_t i=0; i<3; ++i) {
+        uint32_t* copy=nullptr; uint32_t count=0;
+        ASSERT_TRUE(cache.copy(1,0,"n:>0",copy,count)); delete[] copy;
+    }
+    EXPECT_FALSE(cache.can_consult("n:>0"));
+    cache.prepare(1,1);
+    cache.admit(1,1,"n:>0",ids.data(),ids.size());
+    EXPECT_EQ(0,cache.size()); // Invalidation does not replenish the copy budget.
+    eval_membership_cache_t lookups;
+    for(size_t i=0;i<eval_membership_cache_t::MAX_LOOKUPS;++i) ASSERT_TRUE(lookups.can_consult("n:>0"));
+    EXPECT_FALSE(lookups.can_consult("n:>0"));
+    eval_membership_cache_t nodes;
+    for(size_t i=0;i<eval_membership_cache_t::MAX_ELIGIBILITY_NODES;++i) ASSERT_TRUE(nodes.consume_eligibility_node());
+    EXPECT_FALSE(nodes.consume_eligibility_node()); EXPECT_FALSE(nodes.can_consult("n:>0"));
+    eval_membership_cache_t expression;
+    EXPECT_FALSE(expression.can_consult(std::string(eval_membership_cache_t::MAX_EXPRESSION_BYTES+1,'x')));
+    ids.push_back(1);
+    expression.admit(1,0,"n:>0",ids.data(),ids.size()); EXPECT_EQ(0,expression.size());
+}
+
 class EvalMembershipSearchTest : public ::testing::Test {
 protected:
     Store* store = nullptr;

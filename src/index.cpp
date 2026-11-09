@@ -6846,13 +6846,15 @@ Option<bool> Index::search_wildcard(const std::vector<sort_by>& sort_fields, Top
 
 namespace {
 // Deliberately narrow: every external/mutable dependency outside this Index bypasses.
-bool eval_cache_eligible(const filter_node_t* node, const tsl::htrie_map<char, field>& schema) {
+bool eval_cache_eligible(const filter_node_t* node, const tsl::htrie_map<char, field>& schema,
+                         eval_membership_cache_t* budget) {
+    if (!budget->consume_eligibility_node()) return false;
     if (node == nullptr || node->is_object_filter_root || !node->object_field_name.empty()) {
         return false;
     }
     if (node->isOperator) {
         return (node->filter_operator == AND || node->filter_operator == OR) &&
-               eval_cache_eligible(node->left, schema) && eval_cache_eligible(node->right, schema);
+               eval_cache_eligible(node->left, schema, budget) && eval_cache_eligible(node->right, schema, budget);
     }
     const auto& leaf = node->filter_exp;
     auto it = schema.find(leaf.field_name);
@@ -6949,7 +6951,8 @@ Option<bool> Index::populate_sort_mapping(int* sort_order, std::vector<size_t>& 
             }
             for (uint32_t j = 0; j < count; j++) {
                 const bool eligible = eval_cache != nullptr &&
-                        eval_cache_eligible(eval_exp.filter_trees[j], search_schema) && eval_cache_within_deadline();
+                        eval_cache->can_consult(sort_fields_std[i].eval_expressions[j]) &&
+                        eval_cache_eligible(eval_exp.filter_trees[j], search_schema, eval_cache) && eval_cache_within_deadline();
                 uint32_t* eval_ids = nullptr;
                 uint32_t eval_ids_count = 0;
                 if (eligible && eval_cache->copy(eval_cache_incarnation, eval_cache_generation,
