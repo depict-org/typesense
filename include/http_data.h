@@ -303,6 +303,10 @@ struct http_req {
 
     bool is_binary_body = false;
 
+    // Live upload state only: a committed text chunk must end at a UTF-8
+    // boundary so older replicas can also snapshot its partial JSONL record.
+    std::string body_utf8_tail;
+
     std::atomic<bool> is_write = false;
 
     bool (*async_res_set_headers_callback)(const std::string&, const std::shared_ptr<http_req>, long, std::string&) = nullptr;
@@ -447,6 +451,40 @@ struct http_req {
         log_index = j.count("log_index") != 0 ? j["log_index"].get<int64_t>() : 0;
     }
 
+    bool prepare_body_for_serialization() {
+        if (is_binary_body) {
+            return true;
+        }
+
+        if (!body_utf8_tail.empty()) {
+            body.insert(0, body_utf8_tail);
+            body_utf8_tail.clear();
+        }
+
+        if (body.empty()) {
+            return true;
+        }
+
+        size_t start = body.size() - 1;
+        while (start > 0 && body.size() - start < 4 &&
+               (static_cast<unsigned char>(body[start]) & 0xc0) == 0x80) {
+            --start;
+        }
+
+        const auto lead = static_cast<unsigned char>(body[start]);
+        const size_t width = (lead >= 0xc2 && lead <= 0xdf) ? 2 :
+                             (lead >= 0xe0 && lead <= 0xef) ? 3 :
+                             (lead >= 0xf0 && lead <= 0xf4) ? 4 : 0;
+        if (width > body.size() - start) {
+            if (last_chunk_aggregate) {
+                return false;
+            }
+            body_utf8_tail = body.substr(start);
+            body.resize(start);
+        }
+        return true;
+    }
+
     std::string to_json() const {
         nlohmann::json j;
         j["route_hash"] = route_hash;
@@ -457,11 +495,8 @@ struct http_req {
         j["metadata"] = metadata;
         j["start_ts"] = start_ts;
         j["log_index"] = log_index;
-        // Streamed bodies can split a UTF-8 code point between chunks. Preserve
-        // their bytes until reassembly, using the encoding older nodes decode.
-        const bool encode_body = is_binary_body || !first_chunk_aggregate || !last_chunk_aggregate;
-        j["is_binary_body"] = encode_body;
-        if (encode_body) {
+        j["is_binary_body"] = is_binary_body;
+        if (is_binary_body) {
             j["body"] = StringUtils::base64_encode(body);
         }
         const std::string j_dump = j.dump(-1, ' ', false, nlohmann::detail::error_handler_t::ignore);

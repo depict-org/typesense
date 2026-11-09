@@ -7,6 +7,7 @@ failed imports, missing documents, or a transport failure. Timing is not measure
 """
 import argparse
 import hashlib
+import gzip
 import http.client
 import json
 import socket
@@ -44,6 +45,8 @@ def rpc(args, method, path, body=None, wire="length", step=65536):
         conn.putheader("Content-Type", "application/json")
         conn.putheader("User-Agent", "depict-fleet-probe/w28-tsutf8")
         conn.putheader("x-depict-fleet-probe", "1")
+        if body is not None and args.gzip and "/documents/import?" in path:
+            conn.putheader("Content-Encoding", "gzip")
         if body is not None:
             conn.putheader("Transfer-Encoding" if wire == "chunked" else "Content-Length",
                            "chunked" if wire == "chunked" else str(len(body)))
@@ -83,6 +86,8 @@ def main():
     parser.add_argument("--api-key", default="synthetic-tsutf8")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--delay", type=float, default=0.001)
+    parser.add_argument("--gzip", action="store_true",
+                        help="Use gzip level 0 to exercise decompression across large wire chunks")
     parser.add_argument("--sizes", type=int, nargs="+", default=[127*1024, 192*1024, 256*1024, 508*1024])
     parser.add_argument("--counts", type=int, nargs="+", default=[1, 100])
     parser.add_argument("--alphabets", nargs="+", default=["two", "three", "four"])
@@ -98,9 +103,11 @@ def main():
             for count in args.counts:
                 for alphabet in args.alphabets:
                     docs, body = fixture(size, count, alphabets[alphabet])
+                    wire_body = gzip.compress(body, compresslevel=0, mtime=0) if args.gzip else body
                     for wire, step in [("length", 65536), ("length", 4093),
                                        ("chunked", 16381), ("chunked", 65535)]:
                         row = dict(size=size, docs=count, alphabet=alphabet, wire=wire, step=step,
+                                   gzip=args.gzip, wire_bytes=len(wire_body),
                                    body_sha256=hashlib.sha256(body).hexdigest())
                         try:
                             if created:
@@ -111,7 +118,7 @@ def main():
                             assert status == 201, f"Collection creation failed: {status}"
                             created = True
                             status, response = rpc(args, "POST", f"/collections/{collection}/documents/import?action=upsert",
-                                                   body, wire, step)
+                                                   wire_body, wire, step)
                             results = [json.loads(line) for line in response.splitlines() if line]
                             row.update(status=status, import_rows=len(results),
                                        import_errors=[r for r in results if not r.get("success")][:2])
