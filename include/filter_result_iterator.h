@@ -454,10 +454,7 @@ public:
                                uint32_t* phrase_result_ids, const uint32_t& phrase_result_count);
 
     // Valid only after compute_iterators(); incomplete/partial arrays must not be reused.
-    [[nodiscard]] bool materialization_complete() {
-        return is_filter_result_initialized && validity != timed_out && status.ok() &&
-               (timeout_info == nullptr || !is_timed_out(true));
-    }
+    [[nodiscard]] bool materialization_complete();
 
     [[nodiscard]] bool _get_is_filter_result_initialized() const {
         return is_filter_result_initialized;

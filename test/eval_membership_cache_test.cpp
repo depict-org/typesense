@@ -109,9 +109,9 @@ protected:
             {"name":"available","type":"bool"}, {"name":"tags","type":"string[]"},
             {"name":"group","type":"string","facet":true},
             {"name":"embedding","type":"float[]","num_dim":2},
-            {"name":"f","type":"float"}, {"name":"numbers","type":"int32[]"},
-            {"name":"hidden","type":"bool","index":false},
-            {"name":"items","type":"object[]"}, {"name":"items.tags","type":"string[]"}]})"_json;
+            {"name":"f","type":"float","optional":true}, {"name":"numbers","type":"int32[]","optional":true},
+            {"name":"hidden","type":"bool","index":false,"optional":true},
+            {"name":"items","type":"object[]","optional":true}, {"name":"items.tags","type":"string[]","optional":true}]})"_json;
         auto created = manager.create_collection(schema);
         ASSERT_TRUE(created.ok()) << created.error();
         coll = created.get();
@@ -319,6 +319,14 @@ TEST_F(EvalMembershipSearchTest, UnsupportedLeavesAndCustomCutoffsBypass) {
     request["search_cutoff_ms"] = "30000";
     expect_parity(request, cache);
     EXPECT_EQ(0, cache.hits());
+    request.erase("search_cutoff_ms");
+    ASSERT_TRUE(manager.upsert_preset("eval_cutoff", {{"search_cutoff_ms", 30000}}).ok());
+    request["preset"] = "eval_cutoff";
+    expect_parity(request, cache);
+    EXPECT_EQ(0, cache.hits());
+    request.erase("preset");
+    expect_parity(request, cache, {{"search_cutoff_ms", 30000}});
+    EXPECT_EQ(0, cache.hits());
 }
 
 TEST_F(EvalMembershipSearchTest, DictionaryBypassesAfterMutationAndTokenizerCacheEviction) {
@@ -444,4 +452,23 @@ TEST_F(EvalMembershipSearchTest, OrdinaryMultiSearchKeepsLegResponsesAndErrorIso
             EXPECT_EQ(expected[i], one) << i;
         }
     }
+}
+
+TEST_F(EvalMembershipSearchTest, ReferenceAndJoinDependenciesBypass) {
+    auto schema = R"({"name":"eval_reference","fields":[
+        {"name":"title","type":"string"},
+        {"name":"ref","type":"int64","reference":"eval_cache.n"}]})"_json;
+    auto created = manager.create_collection(schema);
+    ASSERT_TRUE(created.ok()) << created.error();
+    ASSERT_TRUE(created.get()->add(R"({"id":"0","title":"alpha","ref":0})").ok());
+    eval_membership_cache_t cache;
+    auto request = params(); request["collection"] = "eval_reference";
+    request["sort_by"] = "_eval(ref:>=0):desc";
+    nlohmann::json result;
+    ASSERT_TRUE(search(request, &cache, result).ok());
+    expect_parity(request, cache);
+    EXPECT_EQ(0, cache.admissions());
+    request["sort_by"] = "_eval($eval_cache(n:>=0)):desc";
+    expect_parity(request, cache);
+    EXPECT_EQ(0, cache.admissions());
 }

@@ -52,6 +52,10 @@ spp::sparse_hash_map<uint32_t, int64_t, Hasher32> Index::vector_distance_sentine
 spp::sparse_hash_map<uint32_t, int64_t, Hasher32> Index::vector_query_sentinel_value;
 spp::sparse_hash_map<uint32_t, int64_t, Hasher32> Index::union_search_index_sentinel_value;
 
+#ifdef TEST_BUILD
+thread_local size_t testing_eval_membership_builds = 0;
+#endif
+
 namespace {
     std::atomic<uint64_t> next_eval_cache_incarnation{1};
 }
@@ -6954,6 +6958,9 @@ Option<bool> Index::populate_sort_mapping(int* sort_order, std::vector<size_t>& 
                     eval_exp.eval_ids_count_vec.push_back(eval_ids_count);
                     continue;
                 }
+#ifdef TEST_BUILD
+                ++testing_eval_membership_builds;
+#endif
                 auto filter_result_iterator = filter_result_iterator_t("", this, eval_exp.filter_trees[j], false,
                                                                        DEFAULT_FILTER_BY_CANDIDATES,
                                                                        search_begin_us, search_stop_us,

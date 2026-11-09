@@ -3179,6 +3179,11 @@ void filter_result_iterator_t::compute_iterators() {
     approx_filter_ids_length = filter_result.count;
 }
 
+bool filter_result_iterator_t::materialization_complete() {
+    return is_filter_result_initialized && validity != timed_out && status.ok() &&
+           (timeout_info == nullptr || !is_timed_out(true));
+}
+
 bool filter_result_iterator_t::is_timed_out(const bool& curation_function_call_counter) {
     if (validity == timed_out) {
         return true;
