@@ -208,6 +208,8 @@ cc_test(
            "-fuse-ld=lld",
            "-Wl,--wrap=_ZNSt6chrono3_V212system_clock3nowEv",
            "-Wl,--wrap=_Znam", "-Wl,--wrap=_ZdaPv", "-Wl,--wrap=_ZdaPvm",
+           "-Wl,--wrap=_ZN5Store6insertERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEES7_",
+           "-Wl,--wrap=_ZN5Store11batch_writeERN7rocksdb10WriteBatchE",
        ],
        "//conditions:default": [],
    })

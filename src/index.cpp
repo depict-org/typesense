@@ -1,6 +1,7 @@
 #include "index.h"
 
 #include <memory>
+#include <atomic>
 #include <numeric>
 #include <chrono>
 #include <set>
@@ -51,10 +52,15 @@ spp::sparse_hash_map<uint32_t, int64_t, Hasher32> Index::vector_distance_sentine
 spp::sparse_hash_map<uint32_t, int64_t, Hasher32> Index::vector_query_sentinel_value;
 spp::sparse_hash_map<uint32_t, int64_t, Hasher32> Index::union_search_index_sentinel_value;
 
+namespace {
+    std::atomic<uint64_t> next_eval_cache_incarnation{1};
+}
+
 Index::Index(const std::string& name, const uint32_t collection_id, const Store* store,
             ThreadPool* thread_pool,
              const tsl::htrie_map<char, field> & search_schema,
              const std::vector<char>& symbols_to_index, const std::vector<char>& token_separators):
+        eval_cache_incarnation(next_eval_cache_incarnation.fetch_add(1, std::memory_order_relaxed)),
         name(name), collection_id(collection_id), store(store), thread_pool(thread_pool),
         search_schema(search_schema),
         seq_ids(new id_list_t(256)), symbols_to_index(symbols_to_index), token_separators(token_separators) {
@@ -674,6 +680,7 @@ size_t Index::batch_memory_index(Index *index,
     }
 
     std::unique_lock ulock(index->mutex);
+    ++index->eval_cache_generation; // Reindex/insert phase, including partial failures.
 
     for(const auto& field_name: found_fields) {
         //LOG(INFO) << "field name: " << field_name;
@@ -2470,7 +2477,7 @@ Option<filter_result_t> Index::do_filtering_with_reference_ids(const std::string
     return Option<filter_result_t>(filter_result);
 }
 
-Option<bool> Index::run_search(search_args* search_params) {
+Option<bool> Index::run_search(search_args* search_params, eval_membership_cache_t* eval_cache) {
     auto& filter_root = search_params->filter_tree_root_guard;
     std::set<uint32_t> group_by_missing_value_ids;
 
@@ -2583,7 +2590,7 @@ Option<bool> Index::run_search(search_args* search_params) {
                           group_by_missing_value_ids,
                           search_params->collection,
                           search_params->synonym_sets,
-                          search_params->diversity, search_params->group_max_candidates);
+                          search_params->diversity, search_params->group_max_candidates, eval_cache);
 
         // The filter iterator can be updated in places like `Index::do_phrase_search`.
         filter_iterator_guard.release();
@@ -2776,7 +2783,7 @@ Option<bool> Index::run_search(search_args* search_params) {
                   search_params->collection,
                   search_params->synonym_sets,
                   search_params->diversity,
-                  search_params->group_max_candidates
+                  search_params->group_max_candidates, eval_cache
     );
 
     // The filter iterator can be updated in places like `Index::do_phrase_search`.
@@ -3532,7 +3539,8 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                    bool rerank_hybrid_matches, const bool& validate_field_names, bool is_group_by_first_pass,
                    std::set<uint32_t>& group_by_missing_value_ids, Collection const *const collection,
                    const std::vector<std::string>& synonym_sets,
-                   const diversity_t& diversity, const size_t group_max_candidates) const {
+                   const diversity_t& diversity, const size_t group_max_candidates,
+                   eval_membership_cache_t* eval_cache) const {
     std::shared_lock lock(mutex);
 
     group_found_params_t group_found_params{};
@@ -3621,7 +3629,7 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
     std::array<spp::sparse_hash_map<uint32_t, int64_t, Hasher32>*, 3> field_values;
     std::vector<size_t> geopoint_indices;
     auto populate_op = populate_sort_mapping(sort_order, geopoint_indices, sort_fields_std, field_values,
-                                             validate_field_names);
+                                             validate_field_names, eval_cache);
     if (!populate_op.ok()) {
         return populate_op;
     }
@@ -6832,10 +6840,58 @@ Option<bool> Index::search_wildcard(const std::vector<sort_by>& sort_fields, Top
     return Option<bool>(true);
 }
 
+namespace {
+// Deliberately narrow: every external/mutable dependency outside this Index bypasses.
+bool eval_cache_eligible(const filter_node_t* node, const tsl::htrie_map<char, field>& schema) {
+    if (node == nullptr || node->is_object_filter_root || !node->object_field_name.empty()) {
+        return false;
+    }
+    if (node->isOperator) {
+        return (node->filter_operator == AND || node->filter_operator == OR) &&
+               eval_cache_eligible(node->left, schema) && eval_cache_eligible(node->right, schema);
+    }
+    const auto& leaf = node->filter_exp;
+    auto it = schema.find(leaf.field_name);
+    if (leaf.field_name == "id" || leaf.is_ignored_filter || !leaf.referenced_collection_name.empty() ||
+        leaf.is_negate_join || !leaf.params.empty() || it == schema.end()) {
+        return false;
+    }
+    const auto& f = it.value();
+    if (!f.index || f.is_dynamic() || f.nested || f.is_object() || f.num_dim != 0 ||
+        !f.reference.empty() || f.is_reference_helper || f.stem || !f.stem_dictionary.empty() ||
+        leaf.values.empty() || leaf.comparators.size() != leaf.values.size()) {
+        return false;
+    }
+    if (!f.is_single_integer() && !f.is_single_bool() && f.type != field_types::STRING_ARRAY) {
+        return false;
+    }
+    for (size_t i = 0; i < leaf.comparators.size(); ++i) {
+        const auto comparator = leaf.comparators[i];
+        if (comparator != EQUALS && comparator != NOT_EQUALS &&
+            !(f.is_single_integer() && (comparator == LESS_THAN || comparator == LESS_THAN_EQUALS ||
+                                       comparator == GREATER_THAN || comparator == GREATER_THAN_EQUALS))) {
+            return false;
+        }
+        if (f.type == field_types::STRING_ARRAY && leaf.values[i].find('*') != std::string::npos) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool eval_cache_within_deadline() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()) - search_begin_us <= search_stop_us;
+}
+}
+
 Option<bool> Index::populate_sort_mapping(int* sort_order, std::vector<size_t>& geopoint_indices,
                                           std::vector<sort_by>& sort_fields_std,
                                           std::array<spp::sparse_hash_map<uint32_t, int64_t, Hasher32>*, 3>& field_values,
-                                          const bool& validate_field_names) const {
+                                          const bool& validate_field_names, eval_membership_cache_t* eval_cache) const {
+    if (eval_cache != nullptr) {
+        eval_cache->prepare(eval_cache_incarnation, eval_cache_generation);
+    }
     for (size_t i = 0; i < sort_fields_std.size(); i++) {
         if (!sort_fields_std[i].reference_collection_name.empty()) {
             auto& cm = CollectionManager::get_instance();
@@ -6888,6 +6944,16 @@ Option<bool> Index::populate_sort_mapping(int* sort_order, std::vector<size_t>& 
                 continue;
             }
             for (uint32_t j = 0; j < count; j++) {
+                const bool eligible = eval_cache != nullptr &&
+                        eval_cache_eligible(eval_exp.filter_trees[j], search_schema) && eval_cache_within_deadline();
+                uint32_t* eval_ids = nullptr;
+                uint32_t eval_ids_count = 0;
+                if (eligible && eval_cache->copy(eval_cache_incarnation, eval_cache_generation,
+                                                 sort_fields_std[i].eval_expressions[j], eval_ids, eval_ids_count)) {
+                    eval_exp.eval_ids_vec.push_back(eval_ids);
+                    eval_exp.eval_ids_count_vec.push_back(eval_ids_count);
+                    continue;
+                }
                 auto filter_result_iterator = filter_result_iterator_t("", this, eval_exp.filter_trees[j], false,
                                                                        DEFAULT_FILTER_BY_CANDIDATES,
                                                                        search_begin_us, search_stop_us,
@@ -6898,8 +6964,13 @@ Option<bool> Index::populate_sort_mapping(int* sort_order, std::vector<size_t>& 
                 }
 
                 filter_result_iterator.compute_iterators();
-                uint32_t* eval_ids = nullptr;
-                auto eval_ids_count = filter_result_iterator.to_filter_id_array(eval_ids);
+                eval_ids_count = filter_result_iterator.to_filter_id_array(eval_ids);
+                // Zero alone can mean uninitialized or timed out. Only completed,
+                // successful arrays (including complete empty sets) may be retained.
+                if (eligible && filter_result_iterator.materialization_complete() && eval_cache_within_deadline()) {
+                    eval_cache->admit(eval_cache_incarnation, eval_cache_generation,
+                                      sort_fields_std[i].eval_expressions[j], eval_ids, eval_ids_count);
+                }
 
                 eval_exp.eval_ids_vec.push_back(eval_ids);
                 eval_exp.eval_ids_count_vec.push_back(eval_ids_count);
@@ -7526,6 +7597,7 @@ void Index::remove_field(uint32_t seq_id, nlohmann::json& document, const std::s
 Option<uint32_t> Index::remove(const uint32_t seq_id, nlohmann::json & document,
                                const std::vector<field>& del_fields, const bool is_update) {
     std::unique_lock lock(mutex);
+    ++eval_cache_generation; // Invalidate before removals, including update/rollback phases.
 
     // The exception during removal is mostly because of an edge case with auto schema detection:
     // Value indexed as Type T but later if field is dropped and reindexed in another type X,
@@ -7619,6 +7691,7 @@ facet_index_t* Index::_get_facet_index() const {
 
 void Index::refresh_schemas(const std::vector<field>& new_fields, const std::vector<field>& del_fields) {
     std::unique_lock lock(mutex);
+    ++eval_cache_generation;
 
     for(const auto & new_field: new_fields) {
         if(!new_field.index || new_field.is_dynamic()) {
