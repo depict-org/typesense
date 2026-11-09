@@ -82,3 +82,28 @@ TEST_F(EvalMembershipAPITest, RealMultiSearchAvoidsBuildsAndResetsForEachRequest
         }
     }
 }
+
+TEST_F(EvalMembershipAPITest, RealMultiSearchStopsReusingAfterTheLookupLimit) {
+    std::string eval="_eval([";
+    for(size_t i=0;i<15;++i) eval+=(i?",":"")+std::string("(n:=")+std::to_string(i)+"):"+std::to_string(100-i);
+    eval+="]):desc,n:desc";
+    nlohmann::json body,expected=nlohmann::json::array(); body["searches"]=nlohmann::json::array();
+    for(size_t leg=0;leg<9;++leg) {
+        std::map<std::string,std::string> request={{"collection","eval_api"},{"q","*"},
+            {"query_by","title"},{"sort_by",eval},{"per_page","32"}};
+        nlohmann::json embedded; std::string text;
+        auto now=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        ASSERT_TRUE(manager.do_search(request,embedded,text,now).ok());
+        auto response=nlohmann::json::parse(text); response.erase("search_time_ms");response.erase("search_time_us");
+        expected.push_back(response); body["searches"].push_back(request);
+    }
+    auto req=std::make_shared<http_req>();auto res=std::make_shared<http_res>(nullptr);
+    req->body=body.dump();req->embedded_params_vec.resize(9);
+    testing_eval_membership_builds=0; ASSERT_TRUE(post_multi_search(req,res));
+    EXPECT_EQ(22,testing_eval_membership_builds); // 15 initial + 7 beyond 128 consultations.
+    auto response=nlohmann::json::parse(res->body);ASSERT_EQ(9,response["results"].size());
+    for(size_t leg=0;leg<9;++leg) {
+        response["results"][leg].erase("search_time_ms");response["results"][leg].erase("search_time_us");
+        EXPECT_EQ(expected[leg],response["results"][leg]);
+    }
+}

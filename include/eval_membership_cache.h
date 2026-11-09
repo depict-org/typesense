@@ -14,11 +14,12 @@ class eval_membership_cache_t {
 public:
     // Bound added work as well as retained memory. Exhaustion always computes
     // the ordinary result; these budgets are never reset by generation changes.
-    static constexpr size_t MAX_COPY_BYTES = 2 * 1024 * 1024;
-    static constexpr size_t MAX_ENTRY_BYTES = 512 * 1024;
+    static constexpr size_t MAX_COPY_BYTES = 4 * 1024 * 1024;
+    static constexpr size_t MAX_ENTRY_BYTES = 1024 * 1024;
     static constexpr size_t MAX_LOOKUPS = 128;
     static constexpr size_t MAX_EXPRESSION_BYTES = 16 * 1024;
-    static constexpr size_t MAX_ELIGIBILITY_NODES = 8192;
+    // One unit per AST node and per leaf value visited.
+    static constexpr size_t MAX_ELIGIBILITY_WORK = 8192;
 
 private:
     struct key_t {
@@ -41,35 +42,37 @@ private:
         std::vector<uint32_t> ids;
     };
 
-    const size_t max_bytes;
-    const size_t max_entries;
+    const size_t copy_limit, entry_limit, lookup_limit, expression_limit, eligibility_limit;
     size_t retained_bytes = 0;
     size_t hit_count = 0;
     size_t admission_count = 0;
     size_t copied_bytes = 0;
     size_t lookups = 0;
-    size_t eligibility_nodes = 0;
+    size_t eligibility_work = 0;
     std::unordered_map<key_t, entry_t, key_hash_t> entries;
 
 public:
-    explicit eval_membership_cache_t(size_t max_bytes = 8 * 1024 * 1024, size_t max_entries = 256)
-        : max_bytes(max_bytes), max_entries(max_entries) {}
+    explicit eval_membership_cache_t(size_t copy_limit = MAX_COPY_BYTES, size_t entry_limit = MAX_ENTRY_BYTES,
+                                     size_t lookup_limit = MAX_LOOKUPS, size_t expression_limit = MAX_EXPRESSION_BYTES,
+                                     size_t eligibility_limit = MAX_ELIGIBILITY_WORK)
+        : copy_limit(copy_limit), entry_limit(entry_limit), lookup_limit(lookup_limit),
+          expression_limit(expression_limit), eligibility_limit(eligibility_limit) {}
 
     eval_membership_cache_t(const eval_membership_cache_t&) = delete;
     eval_membership_cache_t& operator=(const eval_membership_cache_t&) = delete;
 
     bool can_consult(const std::string& expression) {
-        if (copied_bytes >= MAX_COPY_BYTES || lookups >= MAX_LOOKUPS ||
-            eligibility_nodes >= MAX_ELIGIBILITY_NODES || expression.size() > MAX_EXPRESSION_BYTES) {
+        if (copied_bytes >= copy_limit || lookups >= lookup_limit ||
+            eligibility_work >= eligibility_limit || expression.size() > expression_limit) {
             return false;
         }
         ++lookups;
         return true;
     }
 
-    bool consume_eligibility_node() {
-        if (eligibility_nodes >= MAX_ELIGIBILITY_NODES) return false;
-        ++eligibility_nodes;
+    bool consume_eligibility_work() {
+        if (eligibility_work >= eligibility_limit) return false;
+        ++eligibility_work;
         return true;
     }
 
@@ -89,7 +92,7 @@ public:
               uint32_t*& ids, uint32_t& count) {
         // Key construction can allocate. This optional optimization must not turn an
         // otherwise successful leg into an error when its extra allocation fails.
-        if (entries.empty() || expression.size() > MAX_EXPRESSION_BYTES) return false;
+        if (entries.empty() || expression.size() > expression_limit) return false;
         try {
             auto it = entries.find({incarnation, expression});
             if (it == entries.end() || it->second.generation != generation) {
@@ -97,7 +100,7 @@ public:
             }
             const auto& stored = it->second.ids;
             const auto bytes = stored.size() * sizeof(uint32_t);
-            if (bytes > MAX_COPY_BYTES - copied_bytes) return false;
+            if (bytes > copy_limit - copied_bytes) return false;
             std::unique_ptr<uint32_t[]> result(new uint32_t[stored.size()]);
             std::copy(stored.begin(), stored.end(), result.get());
             count = stored.size();
@@ -112,10 +115,8 @@ public:
 
     void admit(uint64_t incarnation, uint64_t generation, const std::string& expression,
                const uint32_t* ids, uint32_t count) {
-        if (expression.size() > MAX_EXPRESSION_BYTES || count > MAX_ENTRY_BYTES / sizeof(uint32_t) ||
-            count > (MAX_COPY_BYTES - copied_bytes) / sizeof(uint32_t) ||
-            entries.size() >= max_entries || expression.size() > max_bytes - retained_bytes ||
-            count > (max_bytes - retained_bytes - expression.size()) / sizeof(uint32_t)) {
+        if (expression.size() > expression_limit || count > entry_limit / sizeof(uint32_t) ||
+            count > (copy_limit - copied_bytes) / sizeof(uint32_t)) {
             return;
         }
         try {

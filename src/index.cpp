@@ -6848,7 +6848,7 @@ namespace {
 // Deliberately narrow: every external/mutable dependency outside this Index bypasses.
 bool eval_cache_eligible(const filter_node_t* node, const tsl::htrie_map<char, field>& schema,
                          eval_membership_cache_t* budget) {
-    if (!budget->consume_eligibility_node()) return false;
+    if (!budget->consume_eligibility_work()) return false;
     if (node == nullptr || node->is_object_filter_root || !node->object_field_name.empty()) {
         return false;
     }
@@ -6871,14 +6871,16 @@ bool eval_cache_eligible(const filter_node_t* node, const tsl::htrie_map<char, f
     if (!f.is_single_integer() && !f.is_single_bool() && f.type != field_types::STRING_ARRAY) {
         return false;
     }
+    const bool string_array = f.type == field_types::STRING_ARRAY;
     for (size_t i = 0; i < leaf.comparators.size(); ++i) {
+        if (!budget->consume_eligibility_work()) return false;
         const auto comparator = leaf.comparators[i];
         if (comparator != EQUALS && comparator != NOT_EQUALS &&
             !(f.is_single_integer() && (comparator == LESS_THAN || comparator == LESS_THAN_EQUALS ||
                                        comparator == GREATER_THAN || comparator == GREATER_THAN_EQUALS))) {
             return false;
         }
-        if (f.type == field_types::STRING_ARRAY && leaf.values[i].find('*') != std::string::npos) {
+        if (string_array && leaf.values[i].find('*') != std::string::npos) {
             return false;
         }
     }

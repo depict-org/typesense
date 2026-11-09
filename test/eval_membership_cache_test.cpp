@@ -44,7 +44,7 @@ extern "C" bool __wrap__ZN5Store11batch_writeERN7rocksdb10WriteBatchE(Store* sto
 #endif
 
 TEST(EvalMembershipCache, CopiesAndAccountsWithoutAliasingLegs) {
-    eval_membership_cache_t cache(64, 2);
+    eval_membership_cache_t cache;
     uint32_t original[] = {1, 3, 7};
     cache.admit(1, 0, "n:>0", original, 3);
     original[0] = 99;
@@ -73,28 +73,26 @@ TEST(EvalMembershipCache, CopiesAndAccountsWithoutAliasingLegs) {
     EXPECT_EQ(0, count);
 }
 
-TEST(EvalMembershipCache, EntryAndPayloadBudgetsFallBack) {
+TEST(EvalMembershipCache, EntryAndCopyBudgetsFallBack) {
     uint32_t ids[] = {1, 2, 3};
-    eval_membership_cache_t cache(16, 1);
-    cache.admit(1, 0, "12345", ids, 3);
+    eval_membership_cache_t cache(16, 8);
+    cache.admit(1, 0, "n:>0", ids, 3);
     EXPECT_EQ(0, cache.size());
-    cache.admit(1, 0, "1234", ids, 3);
-    EXPECT_EQ(16, cache.bytes());
-    cache.admit(2, 0, "x", nullptr, 0);
-    EXPECT_EQ(1, cache.size());
+    cache.admit(1, 0, "n:>0", ids, 2);
+    EXPECT_EQ(12, cache.bytes());
+    uint32_t* copy=nullptr; uint32_t count=0;
+    ASSERT_TRUE(cache.copy(1,0,"n:>0",copy,count)); delete[] copy;
+    EXPECT_FALSE(cache.can_consult("n:>0"));
     cache.prepare(1, 1);
-    EXPECT_EQ(0, cache.bytes());
-    cache.admit(2, 0, "x", nullptr, 0);
-    EXPECT_EQ(1, cache.bytes());
-    cache.prepare(1, 2);
-    EXPECT_EQ(1, cache.size());
+    cache.admit(1, 1, "n:>0", ids, 1);
+    EXPECT_EQ(0, cache.size());
 }
 
 TEST(EvalMembershipCache, BoundsCopyAndEligibilityWorkAcrossGenerations) {
     eval_membership_cache_t cache;
     std::vector<uint32_t> ids(eval_membership_cache_t::MAX_ENTRY_BYTES / sizeof(uint32_t), 1);
     cache.admit(1, 0, "n:>0", ids.data(), ids.size());
-    for (size_t i=0; i<3; ++i) {
+    for (size_t i=0; i<eval_membership_cache_t::MAX_COPY_BYTES / eval_membership_cache_t::MAX_ENTRY_BYTES - 1; ++i) {
         uint32_t* copy=nullptr; uint32_t count=0;
         ASSERT_TRUE(cache.copy(1,0,"n:>0",copy,count)); delete[] copy;
     }
@@ -106,8 +104,8 @@ TEST(EvalMembershipCache, BoundsCopyAndEligibilityWorkAcrossGenerations) {
     for(size_t i=0;i<eval_membership_cache_t::MAX_LOOKUPS;++i) ASSERT_TRUE(lookups.can_consult("n:>0"));
     EXPECT_FALSE(lookups.can_consult("n:>0"));
     eval_membership_cache_t nodes;
-    for(size_t i=0;i<eval_membership_cache_t::MAX_ELIGIBILITY_NODES;++i) ASSERT_TRUE(nodes.consume_eligibility_node());
-    EXPECT_FALSE(nodes.consume_eligibility_node()); EXPECT_FALSE(nodes.can_consult("n:>0"));
+    for(size_t i=0;i<eval_membership_cache_t::MAX_ELIGIBILITY_WORK;++i) ASSERT_TRUE(nodes.consume_eligibility_work());
+    EXPECT_FALSE(nodes.consume_eligibility_work()); EXPECT_FALSE(nodes.can_consult("n:>0"));
     eval_membership_cache_t expression;
     EXPECT_FALSE(expression.can_consult(std::string(eval_membership_cache_t::MAX_EXPRESSION_BYTES+1,'x')));
     ids.push_back(1);
@@ -408,6 +406,37 @@ TEST_F(EvalMembershipSearchTest, DictionaryBypassesAfterMutationAndTokenizerCach
     ASSERT_EQ("1", result["hits"][0]["document"]["id"]);
     EXPECT_EQ(0, cache.admissions());
     EXPECT_EQ(0, cache.hits());
+}
+
+TEST_F(EvalMembershipSearchTest, EveryWorkLimitFallsBackToTheExactCurrentResult) {
+    using C = eval_membership_cache_t;
+    for (size_t limit=0; limit<5; ++limit) {
+        C cache(limit==0?256:C::MAX_COPY_BYTES, limit==1?4:C::MAX_ENTRY_BYTES,
+                limit==2?2:C::MAX_LOOKUPS, limit==3?5:C::MAX_EXPRESSION_BYTES,
+                limit==4?4:C::MAX_ELIGIBILITY_WORK);
+        const auto prime=params(limit==1?"n:<1":"n:>=0");
+        auto exercise=[&](const std::map<std::string,std::string>& request, size_t expected_builds) {
+            nlohmann::json plain, cached;
+            ASSERT_TRUE(search(request,nullptr,plain).ok());
+            testing_eval_membership_builds=0;
+            ASSERT_TRUE(search(request,&cache,cached).ok());
+            EXPECT_EQ(plain,cached) << "limit=" << limit;
+            EXPECT_EQ(expected_builds,testing_eval_membership_builds) << "limit=" << limit;
+        };
+        exercise(prime,1); exercise(prime,0);
+        EXPECT_EQ(1,cache.hits()); EXPECT_EQ(1,cache.admissions());
+        exercise(params(limit==3?"(n:>=0)":"n:>=0"),1);
+        EXPECT_EQ(1,cache.hits()); EXPECT_EQ(1,cache.admissions());
+    }
+    // A single leaf must charge its values, in addition to its AST node.
+    C values(C::MAX_COPY_BYTES,C::MAX_ENTRY_BYTES,C::MAX_LOOKUPS,C::MAX_EXPRESSION_BYTES,4);
+    auto request=params("n:=[0,1,2,3]");
+    nlohmann::json plain,cached;
+    ASSERT_TRUE(search(request,nullptr,plain).ok());
+    testing_eval_membership_builds=0;
+    ASSERT_TRUE(search(request,&values,cached).ok());
+    EXPECT_EQ(plain,cached); EXPECT_EQ(1,testing_eval_membership_builds);
+    EXPECT_EQ(0,values.admissions()); EXPECT_EQ(0,values.hits());
 }
 
 TEST_F(EvalMembershipSearchTest, BudgetErrorsAndIndependentRequestsKeepLifetimes) {
