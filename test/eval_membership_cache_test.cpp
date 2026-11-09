@@ -60,7 +60,7 @@ TEST(EvalMembershipCache, CopiesAndAccountsWithoutAliasingLegs) {
     std::unique_ptr<uint32_t[]> owned_second(second);
     EXPECT_NE(first, second);
     EXPECT_EQ(1, second[0]);
-    EXPECT_EQ(17, cache.bytes());
+    EXPECT_EQ(16, cache.bytes());
     EXPECT_FALSE(cache.copy(2, 0, "n:>0", second, count));
     EXPECT_FALSE(cache.copy(1, 1, "n:>0", second, count));
     cache.prepare(1, 1);
@@ -286,23 +286,39 @@ TEST_F(EvalMembershipSearchTest, SchemaChangesInvalidateAndKeepPerLegValidation)
 }
 
 TEST_F(EvalMembershipSearchTest, AliasRetargetAndDropRecreateUseDistinctIncarnations) {
+    // Identical explicit schemas and 32 real inserts give equal generations;
+    // opposite membership makes a reused incarnation observably incorrect.
+    ASSERT_TRUE(manager.drop_collection("eval_cache").ok());
+    const auto fields = R"([{"name":"title","type":"string"},{"name":"n","type":"int64"},
+        {"name":"available","type":"bool"},{"name":"tags","type":"string[]"},
+        {"name":"group","type":"string","facet":true},
+        {"name":"embedding","type":"float[]","num_dim":2}])"_json;
+    auto create = [&](const std::string& name, bool invert) {
+        nlohmann::json schema = {{"name", name}, {"fields", fields}};
+        auto created = manager.create_collection(schema);
+        EXPECT_TRUE(created.ok()) << created.error();
+        if (!created.ok()) return static_cast<Collection*>(nullptr);
+        for (size_t i=0; i<32; ++i) {
+            bool original_match = (i>=4 && i%2==0) || i%3==0;
+            nlohmann::json doc = {{"id",std::to_string(i)}, {"title","alpha"},
+                {"n",invert?100+i:i}, {"available",invert?!original_match:i%2==0},
+                {"tags",{!invert && i%3==0?"red":"blue"}},
+                {"group","g"+std::to_string(i/2)}, {"embedding",{1,0.5}}};
+            auto added=created.get()->add(doc.dump()); EXPECT_TRUE(added.ok())<<added.error();
+        }
+        return created.get();
+    };
+    coll=create("eval_cache",false); ASSERT_NE(nullptr,coll);
     eval_membership_cache_t cache;
     ASSERT_TRUE(manager.upsert_symlink("eval_alias", "eval_cache").ok());
-    auto request = params(); request["collection"] = "eval_alias";
-    expect_parity(request, cache);
-    auto schema = coll->get_summary_json();
-    schema["name"] = "other_cache";
-    auto other = manager.create_collection(schema);
-    ASSERT_TRUE(other.ok()) << other.error();
-    ASSERT_TRUE(manager.upsert_symlink("eval_alias", "other_cache").ok());
-    expect_parity(request, cache);
-    EXPECT_EQ(2, cache.admissions());
+    auto request=params();request["collection"]="eval_alias";
+    expect_parity(request,cache);
+    ASSERT_NE(nullptr,create("other_cache",true));
+    ASSERT_TRUE(manager.upsert_symlink("eval_alias","other_cache").ok());
+    expect_parity(request,cache); EXPECT_EQ(2,cache.admissions());
     ASSERT_TRUE(manager.drop_collection("eval_cache").ok());
-    schema["name"] = "eval_cache";
-    auto replacement = manager.create_collection(schema);
-    ASSERT_TRUE(replacement.ok()) << replacement.error(); coll = replacement.get();
-    expect_parity(params(), cache);
-    EXPECT_EQ(3, cache.admissions());
+    coll=create("eval_cache",true); ASSERT_NE(nullptr,coll);
+    expect_parity(params(),cache); EXPECT_EQ(3,cache.admissions());
 }
 
 TEST_F(EvalMembershipSearchTest, UnsupportedLeavesAndCustomCutoffsBypass) {
