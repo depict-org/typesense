@@ -6,6 +6,9 @@
 #include "core_api.h"
 #include <unistd.h>
 #include "collection_manager.h"
+#include "threadpool.h"
+#include "curation_index_manager.h"
+#include "synonym_index_manager.h"
 #include "eval_membership_cache.h"
 #include "filter_result_iterator.h"
 #include "stemmer_manager.h"
@@ -102,7 +105,10 @@ protected:
         std::filesystem::remove_all(path);
         std::filesystem::create_directories(path);
         store = new Store(path);
-        manager.init(store, 1.0, "auth_key", quit);
+        manager.init(store, new ThreadPool(3), 1.0, "auth_key", quit);
+        CurationIndexManager::get_instance().init_store(store);
+        SynonymIndexManager::get_instance().init_store(store);
+        StemmerManager::get_instance().init(store);
         manager.load(1, 1000);
         auto schema = R"({"name":"eval_cache","enable_nested_fields":true,"fields":[
             {"name":"title","type":"string"}, {"name":"n","type":"int64"},
@@ -132,7 +138,10 @@ protected:
         fail_eval_batch = false;
         before_eval_write_failure = {};
 #endif
+        auto* pool = manager.get_thread_pool();
         manager.dispose();
+        pool->shutdown(); delete pool;
+        StemmerManager::get_instance().dispose();
         delete store;
         std::filesystem::remove_all(path);
     }
@@ -337,13 +346,17 @@ TEST_F(EvalMembershipSearchTest, DictionaryBypassesAfterMutationAndTokenizerCach
     auto created = manager.create_collection(schema);
     ASSERT_TRUE(created.ok()) << created.error();
     ASSERT_TRUE(created.get()->add(R"({"id":"0","tags":["red"]})").ok());
+    ASSERT_TRUE(created.get()->add(R"({"id":"1","tags":["blue"]})").ok());
     eval_membership_cache_t cache;
     auto request = params("tags:=scarlet"); request["collection"] = "dictionary_cache";
     request["query_by"] = "tags"; request["sort_by"] = "_eval(tags:=scarlet):desc";
     expect_parity(request, cache);
+    nlohmann::json result;
+    ASSERT_TRUE(search(request, &cache, result).ok());
+    ASSERT_EQ("0", result["hits"][0]["document"]["id"]);
     ASSERT_TRUE(stems.del_stemming_dictionary("eval_dictionary").ok());
     ASSERT_TRUE(stems.upsert_stemming_dictionary("eval_dictionary", {R"({"word":"scarlet","root":"blue"})"}).ok());
-    auto stemmer = stems.get_stemmer("", "eval_dictionary");
+    auto stemmer = created.get()->get_schema().at("tags").get_stemmer();
     for (size_t i = 0; i < 64; ++i) {
         std::vector<std::string> tokens;
         const auto word = "intervening" + std::to_string(i);
@@ -351,6 +364,8 @@ TEST_F(EvalMembershipSearchTest, DictionaryBypassesAfterMutationAndTokenizerCach
         tokenizer.tokenize(tokens);
     }
     expect_parity(request, cache);
+    ASSERT_TRUE(search(request, &cache, result).ok());
+    ASSERT_EQ("1", result["hits"][0]["document"]["id"]);
     EXPECT_EQ(0, cache.admissions());
     EXPECT_EQ(0, cache.hits());
 }

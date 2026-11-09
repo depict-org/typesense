@@ -100,7 +100,8 @@ protected:
     void TearDown() override {
         track_arrays=false;observe_array_lifetimes=false;
         search_begin_us=0;search_stop_us=UINT64_MAX;search_cutoff=false;
-        scripted_clock=false;full_search_probe=false;eval_cache_timeout_probe=false; manager.dispose();delete store;std::filesystem::remove_all(path);
+        scripted_clock=false;full_search_probe=false;eval_cache_timeout_probe=false;
+        auto* pool=manager.get_thread_pool();manager.dispose();pool->shutdown();delete pool;delete store;std::filesystem::remove_all(path);
     }
     std::unique_ptr<filter_node_t> parse(const std::string& q) {
         filter_node_t* root=nullptr;

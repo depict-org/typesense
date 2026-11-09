@@ -4,6 +4,9 @@
 #include <filesystem>
 #include <unistd.h>
 #include "collection_manager.h"
+#include "threadpool.h"
+#include "curation_index_manager.h"
+#include "synonym_index_manager.h"
 #include "core_api.h"
 
 extern thread_local size_t testing_eval_membership_builds;
@@ -18,7 +21,9 @@ protected:
         path = (std::filesystem::temp_directory_path() /
                 ("typesense-eval-api-" + std::to_string(getpid()))).string();
         std::filesystem::remove_all(path); std::filesystem::create_directories(path);
-        store = new Store(path); manager.init(store, 1.0, "auth_key", quit); manager.load(1, 1000);
+        store = new Store(path); manager.init(store, new ThreadPool(3), 1.0, "auth_key", quit);
+        CurationIndexManager::get_instance().init_store(store);
+        SynonymIndexManager::get_instance().init_store(store); manager.load(1, 1000);
         auto schema = R"({"name":"eval_api","fields":[{"name":"title","type":"string"},
             {"name":"n","type":"int64"},{"name":"group","type":"string","facet":true}]})"_json;
         auto created = manager.create_collection(schema);
@@ -29,7 +34,10 @@ protected:
             ASSERT_TRUE(added.ok()) << added.error();
         }
     }
-    void TearDown() override { manager.dispose(); delete store; std::filesystem::remove_all(path); }
+    void TearDown() override {
+        auto* pool = manager.get_thread_pool(); manager.dispose();
+        pool->shutdown(); delete pool; delete store; std::filesystem::remove_all(path);
+    }
 };
 
 TEST_F(EvalMembershipAPITest, RealMultiSearchAvoidsBuildsAndResetsForEachRequest) {
