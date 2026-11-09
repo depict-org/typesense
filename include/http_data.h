@@ -457,8 +457,11 @@ struct http_req {
         j["metadata"] = metadata;
         j["start_ts"] = start_ts;
         j["log_index"] = log_index;
-        j["is_binary_body"] = is_binary_body;
-        if (is_binary_body) {
+        // Streamed bodies can split a UTF-8 code point between chunks. Preserve
+        // their bytes until reassembly, using the encoding older nodes decode.
+        const bool encode_body = is_binary_body || !first_chunk_aggregate || !last_chunk_aggregate;
+        j["is_binary_body"] = encode_body;
+        if (encode_body) {
             j["body"] = StringUtils::base64_encode(body);
         }
         const std::string j_dump = j.dump(-1, ' ', false, nlohmann::detail::error_handler_t::ignore);
@@ -575,4 +578,3 @@ struct async_stream_response_t {
     std::condition_variable cv;
     bool ready = false;
 };
-
