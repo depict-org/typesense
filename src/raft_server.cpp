@@ -360,6 +360,15 @@ void ReplicationState::write(const std::shared_ptr<http_req>& request, const std
         }
     }
 
+    // Normalize decompressed text before either the Raft or indexer envelope
+    // sees it. Older replicas also require valid UTF-8 in snapshot buffers.
+    if (!request->prepare_body_for_serialization()) {
+        response->set_400("Incomplete UTF-8 sequence at end of request body.");
+        response->final = true;
+        auto req_res = new async_req_res_t(request, response, true);
+        return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+    }
+
     // Serialize request to replicated WAL so that all the nodes in the group receive it as well.
     // NOTE: actual write must be done only on the `on_apply` method to maintain consistency.
 

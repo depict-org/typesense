@@ -341,7 +341,7 @@ register_detected_cuda_toolchains()
 new_git_repository(
     name= "snowball",
     build_file = "//bazel:snowball.BUILD",
-    branch = "master",
+    commit = "2d2e312df56f2ede014a4ffb3e91e6dea43c24be",
     remote = "https://github.com/snowballstem/snowball.git"
 )
 

@@ -207,7 +207,7 @@ jobs:
           tar -xzf ./artifacts/v29.tar.gz -C ./artifacts/v29/
 
       - name: Run API tests with secrets
-        if: github.event.pull_request.head.repo.fork == false
+        if: github.event.repository.fork == false && github.event.pull_request.head.repo.fork != true
         working-directory: api_tests
         env:
           TYPESENSE_BINARY_PATH: ${{ github.workspace }}/typesense-server-binary/typesense-server
@@ -219,7 +219,7 @@ jobs:
         run: typesense-api-tests
 
       - name: Run API tests without secrets
-        if: github.event.pull_request.head.repo.fork == true
+        if: github.event.repository.fork == true || github.event.pull_request.head.repo.fork == true
         working-directory: api_tests
         env:
           TYPESENSE_BINARY_PATH: ${{ github.workspace }}/typesense-server-binary/typesense-server
