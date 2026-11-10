@@ -1077,6 +1077,7 @@ bool post_multi_search(const std::shared_ptr<http_req>& req, const std::shared_p
         }
     } else {
         response["results"] = nlohmann::json::array();
+        eval_membership_cache_t eval_cache;
 
         for(size_t i = 0; i < searches.size(); i++) {
             auto& search_params = searches[i];
@@ -1103,7 +1104,7 @@ bool post_multi_search(const std::shared_ptr<http_req>& req, const std::shared_p
 
             std::string results_json_str;
             Option<bool> search_op = CollectionManager::do_search(req->params, req->embedded_params_vec[i],
-                                                                  results_json_str, req->conn_ts);
+                                                                  results_json_str, req->conn_ts, &eval_cache);
 
             auto nl_processing_time_ms = nl_search_op.ok() ? nl_search_op.get() : 0;
             if(search_op.ok()) {

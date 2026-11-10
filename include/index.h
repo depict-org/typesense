@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include "eval_membership_cache.h"
 #include <unordered_map>
 #include <vector>
 #include <mutex>
@@ -399,6 +400,7 @@ struct group_by_field_it_t {
 
 #ifdef TEST_BUILD
     extern bool testing_not_equals_bug;
+    extern thread_local size_t testing_eval_membership_builds;
     extern thread_local size_t testing_curated_second_pass_entries;
     extern thread_local size_t testing_curated_second_pass_unmaterialized_entries;
     // Observe the actual iterator entering HNSW, independently of branch setup.
@@ -409,6 +411,9 @@ struct group_by_field_it_t {
 class Index {
 private:
     mutable std::shared_mutex mutex;
+
+    const uint64_t eval_cache_incarnation;
+    uint64_t eval_cache_generation = 0;
 
     std::string name;
 
@@ -760,7 +765,7 @@ public:
 
     // Public operations
 
-    Option<bool> run_search(search_args* search_params);
+    Option<bool> run_search(search_args* search_params, eval_membership_cache_t* eval_cache = nullptr);
 
     Option<bool> search(std::vector<query_tokens_t>& field_query_tokens, const std::vector<search_field_t>& the_fields,
                 const text_match_type_t match_type,
@@ -805,7 +810,8 @@ public:
                 std::set<uint32_t>& group_by_missing_value_ids,
                 Collection const *const collection,
                const std::vector<std::string>& synonym_sets,
-               const diversity_t& diversity, const size_t group_max_candidates) const;
+               const diversity_t& diversity, const size_t group_max_candidates,
+               eval_membership_cache_t* eval_cache = nullptr) const;
 
     void remove_field(uint32_t seq_id, nlohmann::json& document, const std::string& field_name,
                       const bool is_update);
@@ -908,7 +914,8 @@ public:
     Option<bool> populate_sort_mapping(int* sort_order, std::vector<size_t>& geopoint_indices,
                                        std::vector<sort_by>& sort_fields_std,
                                        std::array<spp::sparse_hash_map<uint32_t, int64_t, Hasher32>*, 3>& field_values,
-                                       const bool& validate_field_names) const;
+                                       const bool& validate_field_names,
+                                       eval_membership_cache_t* eval_cache = nullptr) const;
 
     Option<bool> populate_sort_mapping_with_lock(int* sort_order, std::vector<size_t>& geopoint_indices,
                                                  std::vector<sort_by>& sort_fields_std,

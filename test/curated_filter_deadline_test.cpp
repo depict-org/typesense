@@ -13,6 +13,9 @@
 using Clock = std::chrono::system_clock;
 #if defined(__linux__)
 static thread_local bool scripted_clock = false;
+static thread_local bool eval_cache_timeout_probe = false;
+static thread_local size_t eval_cache_clock_calls = 0;
+static thread_local size_t eval_cache_expire_after = 0;
 static thread_local size_t clock_calls = 0;
 static thread_local bool advance_clock = false;
 static thread_local bool full_search_probe = false;
@@ -38,6 +41,11 @@ extern "C" void __wrap__ZdaPv(void* p) {if(observe_array_lifetimes)forget_array(
 extern "C" void __wrap__ZdaPvm(void* p,size_t n) {if(observe_array_lifetimes)forget_array(p);__real__ZdaPvm(p,n);}
 extern "C" Clock::time_point __real__ZNSt6chrono3_V212system_clock3nowEv();
 extern "C" Clock::time_point __wrap__ZNSt6chrono3_V212system_clock3nowEv() {
+    if (eval_cache_timeout_probe) {
+        const bool expired = testing_eval_membership_builds > 0 &&
+                             eval_cache_clock_calls++ >= eval_cache_expire_after;
+        return Clock::time_point(std::chrono::microseconds(clock_base_us + (expired ? 30000001 : 1)));
+    }
     if(full_search_probe && !scripted_clock && testing_curated_second_pass_entries>0)arm_boundary_clock();
     if (!scripted_clock) return __real__ZNSt6chrono3_V212system_clock3nowEv();
     // Initialization stays below cutoff. Once armed, the unchanged 30,000ms
@@ -92,7 +100,8 @@ protected:
     void TearDown() override {
         track_arrays=false;observe_array_lifetimes=false;
         search_begin_us=0;search_stop_us=UINT64_MAX;search_cutoff=false;
-        scripted_clock=false;full_search_probe=false; manager.dispose();delete store;std::filesystem::remove_all(path);
+        scripted_clock=false;full_search_probe=false;eval_cache_timeout_probe=false;
+        auto* pool=manager.get_thread_pool();manager.dispose();pool->shutdown();delete pool;delete store;std::filesystem::remove_all(path);
     }
     std::unique_ptr<filter_node_t> parse(const std::string& q) {
         filter_node_t* root=nullptr;
@@ -285,5 +294,27 @@ TEST_F(CuratedFilterDeadlineTest, CandidatePreservesReferencesAndLeafLimits) {
     std::vector<uint32_t> actual;
     for (auto id : ids) if (effective.is_valid(id)==1) actual.push_back(id);
     EXPECT_EQ(expected,actual);
+}
+#endif
+
+#if defined(__linux__)
+TEST_F(CuratedFilterDeadlineTest, ExpiredEvalBuildIsNotAdmittedToRequestCache) {
+    for (size_t after : {size_t(0), size_t(1)}) {
+        eval_membership_cache_t cache;
+        testing_eval_membership_builds = 0;
+        eval_cache_clock_calls = 0;
+        eval_cache_expire_after = after;
+        std::map<std::string, std::string> request = {
+            {"collection", "review_probe"}, {"q", "*"}, {"query_by", "s"},
+            {"sort_by", "_eval(n:>=0 && tags:=red):desc"}};
+        nlohmann::json embedded;
+        std::string result;
+        eval_cache_timeout_probe = true;
+        auto op = manager.do_search(request, embedded, result, clock_base_us, &cache);
+        eval_cache_timeout_probe = false;
+        EXPECT_GT(testing_eval_membership_builds, 0);
+        EXPECT_EQ(0, cache.admissions()) << after;
+        EXPECT_EQ(0, cache.size()) << after;
+    }
 }
 #endif

@@ -2855,7 +2855,8 @@ Option<nlohmann::json> Collection::search(std::string query, const std::vector<s
     return search(args);
 }
 
-Option<nlohmann::json> Collection::search(collection_search_args_t& coll_args) {
+Option<nlohmann::json> Collection::search(collection_search_args_t& coll_args,
+                                            eval_membership_cache_t* eval_cache) {
     std::shared_lock lock(mutex);
 
     std::unique_ptr<search_args> search_params_guard;
@@ -2880,7 +2881,7 @@ Option<nlohmann::json> Collection::search(collection_search_args_t& coll_args) {
         return Option<nlohmann::json>(init_index_search_args_op.code(), init_index_search_args_op.error());
     }
 
-    const auto search_op = index->run_search(search_params_guard.get());
+    const auto search_op = index->run_search(search_params_guard.get(), eval_cache);
     if (!search_op.ok()) {
         return Option<nlohmann::json>(search_op.code(), search_op.error());
     }

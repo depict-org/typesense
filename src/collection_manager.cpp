@@ -1413,7 +1413,7 @@ void update_app_metrics(const uint64_t& timeMillis) {
 Option<bool> CollectionManager::do_search(std::map<std::string, std::string>& req_params,
                                           nlohmann::json& embedded_params,
                                           std::string& results_json_str,
-                                          uint64_t start_ts) {
+                                          uint64_t start_ts, eval_membership_cache_t* eval_cache) {
 
     auto begin = std::chrono::high_resolution_clock::now();
 
@@ -1449,7 +1449,12 @@ Option<bool> CollectionManager::do_search(std::map<std::string, std::string>& re
         return init_op;
     }
 
-    Option<nlohmann::json> result_op = collection->search(args);
+    // Presets and embedded parameters have now been applied. Keep custom cutoff
+    // semantics on the ordinary materialization path.
+    if (req_params.count("search_cutoff_ms") != 0) {
+        eval_cache = nullptr;
+    }
+    Option<nlohmann::json> result_op = collection->search(args, eval_cache);
 
     auto end_ts = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();

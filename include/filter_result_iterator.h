@@ -453,6 +453,9 @@ public:
     static void add_phrase_ids(filter_result_iterator_t*& filter_result_iterator,
                                uint32_t* phrase_result_ids, const uint32_t& phrase_result_count);
 
+    // Valid only after compute_iterators(); incomplete/partial arrays must not be reused.
+    [[nodiscard]] bool materialization_complete();
+
     [[nodiscard]] bool _get_is_filter_result_initialized() const {
         return is_filter_result_initialized;
     }

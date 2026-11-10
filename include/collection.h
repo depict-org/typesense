@@ -905,7 +905,8 @@ public:
 
     void do_housekeeping();
 
-    Option<nlohmann::json> search(collection_search_args_t& coll_args);
+    Option<nlohmann::json> search(collection_search_args_t& coll_args,
+                                  eval_membership_cache_t* eval_cache = nullptr);
 
     // Only for tests.
     Option<nlohmann::json> search(std::string query, const std::vector<std::string> & search_fields,

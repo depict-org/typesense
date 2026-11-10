@@ -161,7 +161,7 @@ public:
     static Option<bool> do_search(std::map<std::string, std::string>& req_params,
                                   nlohmann::json& embedded_params,
                                   std::string& results_json_str,
-                                  uint64_t start_ts);
+                                  uint64_t start_ts, eval_membership_cache_t* eval_cache = nullptr);
 
     static Option<bool> do_union(std::map<std::string, std::string>& req_params,
                                  std::vector<nlohmann::json>& embedded_params_vec, nlohmann::json searches,
