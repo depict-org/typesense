@@ -829,10 +829,17 @@ int HttpServer::process_request(const std::shared_ptr<http_req>& request, const 
 
     // LOG(INFO) << "Before enqueue res: " << response
     thread_pool->log_exhaustion();
+    request->enqueue_ts = request_time_us();
     thread_pool->enqueue([rpath, message_dispatcher, request, response]() {
+        request_waits = {};
+        request->run_start_ts = request_time_us();
+        const auto cpu_start = request_thread_cpu_us();
         // call the API handler
         //LOG(INFO) << "Wait for response " << response.get() << ", action: " << rpath->_get_action();
         (rpath->handler)(request, response);
+        request->run_end_ts = request_time_us();
+        request->cpu_us = request_thread_cpu_us() - cpu_start;
+        request->waits = request_waits;
 
         if(!rpath->async_res) {
             // lifecycle of non async res will be owned by stream responder
@@ -875,6 +882,7 @@ void HttpServer::on_deferred_process_request(h2o_timer_t *entry) {
 
 void HttpServer::defer_processing(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res,
                                   size_t timeout_ms) {
+    req->run_start_ts = 0;
     //LOG(INFO) << "defer_processing, exit_loop: " << exit_loop << ", req: " << req.get() << ", use count: " << req.use_count();
     
     if(req->defer_timer.data == nullptr) {

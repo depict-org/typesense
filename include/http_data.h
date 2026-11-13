@@ -12,6 +12,7 @@
 #include "logger.h"
 #include "app_metrics.h"
 #include "tsconfig.h"
+#include "request_waits.h"
 #include "zlib.h"
 
 #define H2O_USE_LIBUV 0
@@ -279,6 +280,8 @@ struct http_req {
     h2o_custom_timer_t defer_timer;
 
     uint64_t start_ts;
+    uint64_t enqueue_ts = 0, run_start_ts = 0, run_end_ts = 0, cpu_us = 0;
+    RequestWaits waits;
 
     // timestamp from the underlying http library
     uint64_t conn_ts;
@@ -386,9 +389,19 @@ struct http_req {
                 }
 
                 std::string full_url_path = metric_identifier + query_string;
+                std::string timing;
+                if(run_start_ts != 0 && run_end_ts >= run_start_ts) {
+                    const auto queue_us = run_start_ts - enqueue_ts;
+                    const auto run_us = run_end_ts - run_start_ts;
+                    const auto other_us = now - start_ts > queue_us + run_us ? now - start_ts - queue_us - run_us : 0;
+                    timing = ", queue_ms=" + std::to_string(queue_us / 1000) + ", run_ms=" + std::to_string(run_us / 1000)
+                             + ", cpu_ms=" + std::to_string(cpu_us / 1000) + ", lock_ms=" + std::to_string(waits.lock_us / 1000)
+                             + ", io_ms=" + std::to_string(waits.io_us / 1000) + ", other_ms=" + std::to_string(other_us / 1000)
+                             + ", top_wait=" + waits.top_site + ":" + waits.top_coll + ":" + std::to_string(waits.top_us / 1000);
+                }
 
                 // NOTE: we log the `body` ONLY for multi-search query
-                LOG(INFO) << "event=slow_request, time=" << ms_since_start << " ms"
+                LOG(INFO) << "event=slow_request, time=" << ms_since_start << " ms" << timing
                           << ", client_ip=" << client_ip << ", endpoint=" << full_url_path
                           << ", body=" << (is_multi_search_query ? body : "");
             }
