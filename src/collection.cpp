@@ -1,4 +1,6 @@
 #include "collection.h"
+#include "request_waits.h"
+#include <algorithm>
 
 #include <numeric>
 #include <chrono>
@@ -296,14 +298,21 @@ Option<doc_seq_id_t> Collection::to_doc(const std::string & json_str, nlohmann::
     }
 }
 
-nlohmann::json Collection::get_summary_json() const {
-    std::shared_lock lock(mutex);
-
+nlohmann::json Collection::get_summary_json(const std::vector<std::string>& exclude_fields) const {
     nlohmann::json json_response;
 
     json_response["name"] = name;
     json_response["num_documents"] = num_documents.load();
     json_response["created_at"] = created_at.load();
+    const auto excluded = [&](const char* key) {
+        return std::find(exclude_fields.begin(), exclude_fields.end(), key) != exclude_fields.end();
+    };
+    const auto schema_keys = {"enable_nested_fields", "token_separators", "symbols_to_index", "synonym_sets",
+                              "curation_sets", "fields", "default_sorting_field", "metadata", "voice_query_model"};
+    if(std::all_of(schema_keys.begin(), schema_keys.end(), excluded)) {
+        return json_response;
+    }
+    auto lock = timed_shared_lock(mutex, "summary", name);
     json_response["enable_nested_fields"] = enable_nested_fields;
     json_response["token_separators"] = nlohmann::json::array();
     json_response["symbols_to_index"] = nlohmann::json::array();
@@ -322,7 +331,9 @@ nlohmann::json Collection::get_summary_json() const {
     constexpr char kSuffix[] = "_sequence_id";
     constexpr size_t kLen = sizeof(kSuffix) - 1; // exclude '\0'
 
-    for(const field & coll_field: fields) {
+    const auto fields_end = excluded("fields") ? fields.cbegin() : fields.cend();
+    for(auto summary_field = fields.cbegin(); summary_field != fields_end; ++summary_field) {
+        const field& coll_field = *summary_field;
         const std::string& s = coll_field.name;
         if (s.size() >= kLen && std::memcmp(s.data() + s.size() - kLen, kSuffix, kLen) == 0) {
             continue; // skip foo_sequence_id
@@ -2857,7 +2868,7 @@ Option<nlohmann::json> Collection::search(std::string query, const std::vector<s
 
 Option<nlohmann::json> Collection::search(collection_search_args_t& coll_args,
                                             eval_membership_cache_t* eval_cache) {
-    std::shared_lock lock(mutex);
+    auto lock = timed_shared_lock(mutex, "collection", name);
 
     std::unique_ptr<search_args> search_params_guard;
     std::string query;
@@ -6362,7 +6373,9 @@ Option<bool> Collection::get_document_from_store(const uint32_t& seq_id,
 Option<bool> Collection::get_document_from_store(const std::string &seq_id_key,
                                                  nlohmann::json& document, bool raw_doc) const {
     std::string json_doc_str;
+    const auto io_start = request_time_us();
     StoreStatus json_doc_status = store->get(seq_id_key, json_doc_str);
+    request_waits.io_us += request_time_us() - io_start;
 
     if(json_doc_status != StoreStatus::FOUND) {
         if(json_doc_status == StoreStatus::NOT_FOUND) {

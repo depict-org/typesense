@@ -1,4 +1,5 @@
 #include "index.h"
+#include "request_waits.h"
 
 #include <memory>
 #include <atomic>
@@ -3545,7 +3546,7 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                    const std::vector<std::string>& synonym_sets,
                    const diversity_t& diversity, const size_t group_max_candidates,
                    eval_membership_cache_t* eval_cache) const {
-    std::shared_lock lock(mutex);
+    auto lock = timed_shared_lock(mutex, "index", get_collection_name());
 
     group_found_params_t group_found_params{};
     if (is_group_by_first_pass) {
