@@ -111,8 +111,10 @@ export class TypesenseProcessManager {
         ...(node.extraArgs ?? []),
       ];
       this.spawnServer(node.name, args, node.port);
-      // Establish a leader in the first majority before starting the remaining members.
-      if (index === Math.floor(nodes.length / 2)) await this.waitForHealth(nodes[0]!.port);
+      // A cluster with per-node limits needs a leader before its constrained members join.
+      if (nodes.some(node => node.extraArgs?.length) && index === Math.floor(nodes.length / 2)) {
+        await this.waitForHealth(nodes[0]!.port);
+      }
     }
     await this.waitForHealth(nodes[0]!.port);
     await this.electLeader(nodes[0]!.port);
