@@ -343,7 +343,7 @@ public:
     }
 
     bool operator()(hnswlib::labeltype id) override {
-        if (filter_result_iterator->approx_filter_ids_length == 0 && excluded_ids_length == 0) {
+        if (is_unfiltered()) {
             return true;
         }
 
@@ -379,7 +379,7 @@ struct hnsw_index_t {
     void index_batch(std::vector<index_record>& records, const field& vector_field, ThreadPool* thread_pool);
     void remove(uint32_t seq_id);
     std::vector<float> get_vector(uint32_t seq_id) const;
-    std::vector<std::pair<float, size_t>> search(const float* query, size_t k, size_t ef,
+    std::vector<std::pair<float, size_t>> search(const float* query, size_t neighbor_count, size_t search_ef,
                                                VectorFilterFunctor& filter) const;
 
     // ensures that this index is not dropped when it's being repaired

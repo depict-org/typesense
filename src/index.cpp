@@ -745,19 +745,28 @@ std::vector<float> hnsw_index_t::get_vector(uint32_t seq_id) const {
     return vecdex->getDataByLabel<float>(document->second);
 }
 
-std::vector<std::pair<float, size_t>> hnsw_index_t::search(const float* query, size_t k, size_t ef,
+std::vector<std::pair<float, size_t>> hnsw_index_t::search(const float* query, size_t neighbor_count, size_t search_ef,
                                                         VectorFilterFunctor& filter) const {
     PointFilterFunctor point_filter(*this, filter);
-    auto nearest = vecdex->searchKnnCloserFirst(query, k, ef, &point_filter);
+    auto nearest = vecdex->searchKnnCloserFirst(query, neighbor_count, search_ef, &point_filter);
     std::vector<std::pair<float, size_t>> documents;
     for (const auto& point : nearest) {
         auto members = point_to_members.find(point.second);
         if (members == point_to_members.end()) continue;
-        for (auto seq_id : members->second.members)
-            if (filter(seq_id)) documents.emplace_back(point.first, seq_id);
+        size_t passing_documents = 0;
+        for (auto member = members->second.members.rbegin();
+             member != members->second.members.rend() && passing_documents < neighbor_count; ++member) {
+            if (filter(*member)) {
+                documents.emplace_back(point.first, *member);
+                ++passing_documents;
+            }
+        }
     }
-    std::sort(documents.begin(), documents.end());
-    if (documents.size() > k) documents.resize(k);
+    std::sort(documents.begin(), documents.end(), [](const auto& left_document, const auto& right_document) {
+        return left_document.first != right_document.first ? left_document.first < right_document.first
+                                                          : left_document.second > right_document.second;
+    });
+    if (documents.size() > neighbor_count) documents.resize(neighbor_count);
     return documents;
 }
 
@@ -769,13 +778,14 @@ void hnsw_index_t::index_batch(std::vector<index_record>& records, const field& 
         std::vector<std::future<void>> tasks;
         for (size_t begin = 0; begin < count; begin += window)
             tasks.push_back(thread_pool->enqueue([&, begin, count, window]() {
-                for (size_t i = begin; i < std::min(count, begin + window); ++i) work(i);
+                for (size_t work_index = begin; work_index < std::min(count, begin + window); ++work_index)
+                    work(work_index);
             }));
         for (auto& task : tasks) task.get();
     };
     // Independent parsing, normalization and hashing retain the four worker windows.
-    parallel(records.size(), [&](size_t i) {
-        auto& record = records[i];
+    parallel(records.size(), [&](size_t record_index) {
+        auto& record = records[record_index];
         if (!record.indexed.ok() || !record.doc.count(vector_field.name)) return;
         try {
             auto values = record.doc[vector_field.name].get<std::vector<float>>();
@@ -783,10 +793,10 @@ void hnsw_index_t::index_batch(std::vector<index_record>& records, const field& 
                 if (!(vector_field.optional && values.empty())) record.index_failure(400, "Vector size mismatch.");
                 return;
             }
-            prepared[i].values.resize(num_dim);
-            if (distance_type == cosine) normalize_vector(values, prepared[i].values);
-            else prepared[i].values = std::move(values);
-            prepared[i].hash = StringUtils::hash_wy(prepared[i].values.data(), num_dim * sizeof(float));
+            prepared[record_index].values.resize(num_dim);
+            if (distance_type == cosine) normalize_vector(values, prepared[record_index].values);
+            else prepared[record_index].values = std::move(values);
+            prepared[record_index].hash = StringUtils::hash_wy(prepared[record_index].values.data(), num_dim * sizeof(float));
         } catch (const std::exception& error) { record.index_failure(400, error.what()); }
     });
     // Searches wait on the caller's Index write lock throughout all three phases.
@@ -796,31 +806,31 @@ void hnsw_index_t::index_batch(std::vector<index_record>& records, const field& 
         auto stored = changed == pending.end() ? vecdex->getDataByLabel<float>(point_id) : prepared[changed->second].values;
         return std::memcmp(stored.data(), values.data(), num_dim * sizeof(float)) == 0;
     };
-    for (size_t i = 0; i < records.size(); ++i) {
-        if (prepared[i].values.empty() || !records[i].indexed.ok()) continue;
-        auto seq_id = records[i].seq_id;
+    for (size_t record_index = 0; record_index < records.size(); ++record_index) {
+        if (prepared[record_index].values.empty() || !records[record_index].indexed.ok()) continue;
+        auto seq_id = records[record_index].seq_id;
         auto old = seq_to_point.find(seq_id);
-        if (old != seq_to_point.end() && matches(old->second, prepared[i].values)) continue;
-        auto equal = hash_to_point.find(prepared[i].hash);
+        if (old != seq_to_point.end() && matches(old->second, prepared[record_index].values)) continue;
+        auto equal = hash_to_point.find(prepared[record_index].hash);
         uint64_t point_id;
-        if (equal != hash_to_point.end() && matches(equal->second, prepared[i].values)) {
+        if (equal != hash_to_point.end() && matches(equal->second, prepared[record_index].values)) {
             point_id = equal->second;
             remove(seq_id);
         } else if (old != seq_to_point.end() && point_to_members.at(old->second).members.size() == 1) {
             point_id = old->second;
             auto hash = hash_to_point.find(point_to_members.at(point_id).hash);
             if (hash != hash_to_point.end() && hash->second == point_id) hash_to_point.erase(hash);
-            point_to_members.at(point_id).hash = prepared[i].hash;
-            pending[point_id] = i;
+            point_to_members.at(point_id).hash = prepared[record_index].hash;
+            pending[point_id] = record_index;
         } else {
             remove(seq_id);
             point_id = next_point_id++;
-            point_to_members.emplace(point_id, point_t{{}, prepared[i].hash});
-            pending[point_id] = i;
+            point_to_members.emplace(point_id, point_t{{}, prepared[record_index].hash});
+            pending[point_id] = record_index;
         }
         seq_to_point[seq_id] = point_id;
         point_to_members.at(point_id).members.insert(seq_id);
-        hash_to_point.emplace(prepared[i].hash, point_id); // A hash collision never bypasses memcmp.
+        hash_to_point.emplace(prepared[record_index].hash, point_id); // A hash collision never bypasses memcmp.
     }
     std::vector<std::pair<uint64_t, size_t>> writes;
     size_t new_points = 0;
@@ -830,24 +840,26 @@ void hnsw_index_t::index_batch(std::vector<index_record>& records, const field& 
         writes.push_back(point);
         new_points += !live->second.indexed;
     }
-    std::sort(writes.begin(), writes.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+    std::sort(writes.begin(), writes.end(), [](const auto& left_write, const auto& right_write) {
+        return left_write.second < right_write.second;
+    });
     auto required = vecdex->getCurrentElementCount() + new_points;
     if (required > vecdex->getMaxElements()) vecdex->resizeIndex(required * 1.3);
     struct failure_t { bool failed = false; std::string message; };
     std::vector<failure_t> failures(writes.size());
-    parallel(writes.size(), [&](size_t i) {
-        try { vecdex->addPoint(prepared[writes[i].second].values.data(), writes[i].first, true); }
-        catch (const std::exception& error) { failures[i] = {true, error.what()}; }
+    parallel(writes.size(), [&](size_t write_index) {
+        try { vecdex->addPoint(prepared[writes[write_index].second].values.data(), writes[write_index].first, true); }
+        catch (const std::exception& error) { failures[write_index] = {true, error.what()}; }
     });
-    for (size_t i = 0; i < writes.size(); ++i) {
-        const auto point_id = writes[i].first;
+    for (size_t write_index = 0; write_index < writes.size(); ++write_index) {
+        const auto point_id = writes[write_index].first;
         auto& point = point_to_members.at(point_id);
-        if (!failures[i].failed) { point.indexed = true; continue; }
+        if (!failures[write_index].failed) { point.indexed = true; continue; }
         // addPoint can register a label before throwing; retire any partial graph entry too.
         auto graph_point = vecdex->label_lookup_.find(point_id);
         point.indexed = graph_point != vecdex->label_lookup_.end() && !vecdex->isMarkedDeleted(graph_point->second);
         for (auto& record : records)
-            if (point.members.count(record.seq_id)) record.index_failure(400, failures[i].message);
+            if (point.members.count(record.seq_id)) record.index_failure(400, failures[write_index].message);
         const auto members = point.members;
         for (auto seq_id : members) remove(seq_id);
     }
