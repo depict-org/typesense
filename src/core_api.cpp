@@ -2458,7 +2458,15 @@ bool post_compact_db(const std::shared_ptr<http_req>& req, const std::shared_ptr
 }
 
 bool post_compact_dropped_db(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res) {
-    auto op = CollectionManager::get_instance().compact_dropped_collections();
+    for(const auto& param : {"dry_run", "compact"}) {
+        if(req->params.count(param) && req->params[param] != "true" && req->params[param] != "false") {
+            res->set_400(std::string(param) + " must be true or false.");
+            return true;
+        }
+    }
+    auto op = CollectionManager::get_instance().compact_dropped_collections(
+        req->params.count("dry_run") && req->params["dry_run"] == "true",
+        req->params.count("compact") && req->params["compact"] == "true");
     if(op.ok()) {
         res->set_200(op.get().dump());
     } else {

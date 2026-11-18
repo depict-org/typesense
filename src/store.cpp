@@ -1,5 +1,6 @@
 #include "include/store.h"
 #include <rocksdb/convenience.h>
+#include <sys/statvfs.h>
 
 Store::Store(const std::string & state_dir_path, const size_t wal_ttl_secs, const size_t wal_size_mb, bool disable_wal,
              int32_t ttl, size_t write_buffer_size,size_t max_write_buffer_number, size_t max_log_file_size,
@@ -272,10 +273,10 @@ int Store::reload(bool clear_state_dir, const std::string& snapshot_path, int32_
     return 0;
 }
 
-void Store::flush() {
+rocksdb::Status Store::flush() {
     std::shared_lock lock(mutex);
     rocksdb::FlushOptions options;
-    db->Flush(options);
+    return db->Flush(options);
 }
 
 rocksdb::Status Store::compact_all() {
@@ -311,8 +312,18 @@ rocksdb::Status Store::compact_range(const rocksdb::Slice& begin_key, const rock
     return db->CompactRange(rocksdb::CompactRangeOptions(), &begin_key, &end_key);
 }
 
-rocksdb::Status Store::compact_dropped_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) {
+rocksdb::Status Store::compact_dropped_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key,
+                                            bool compact) {
     std::shared_lock lock(mutex);
+    if(compact) {
+        struct statvfs fs;
+        if(statvfs(state_dir_path.c_str(), &fs) != 0) {
+            return rocksdb::Status::IOError("Could not determine free disk space for compaction.");
+        }
+        if(uint64_t(fs.f_bavail) * fs.f_frsize < COMPACTION_FREE_DISK_FLOOR_BYTES) {
+            return rocksdb::Status::IOError("Compaction requires at least 64 GiB free before each range.");
+        }
+    }
     auto status = rocksdb::DeleteFilesInRange(db, db->DefaultColumnFamily(), &begin_key, &end_key, false);
     if(!status.ok()) {
         return status;
@@ -322,12 +333,18 @@ rocksdb::Status Store::compact_dropped_range(const rocksdb::Slice& begin_key, co
     if(!status.ok()) {
         return status;
     }
-    return db->CompactRange(rocksdb::CompactRangeOptions(), &begin_key, &end_key);
+    return compact ? db->CompactRange(rocksdb::CompactRangeOptions(), &begin_key, &end_key) : rocksdb::Status::OK();
 }
 
-bool Store::get_live_sst_files_size(uint64_t& bytes) const {
+Option<uint64_t> Store::get_approximate_range_size(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) const {
     std::shared_lock lock(mutex);
-    return db->GetIntProperty("rocksdb.live-sst-files-size", &bytes);
+    rocksdb::Range range(begin_key, end_key);
+    uint64_t bytes = 0;
+    auto status = db->GetApproximateSizes(&range, 1, &bytes);
+    if(!status.ok()) {
+        return Option<uint64_t>(500, status.ToString());
+    }
+    return Option<uint64_t>(bytes);
 }
 
 rocksdb::DB* Store::_get_db_unsafe() const {

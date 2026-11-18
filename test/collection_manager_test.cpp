@@ -104,10 +104,44 @@ TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     ASSERT_TRUE(live->add(R"({"id":"0","title":"survivor"})").ok());
     ASSERT_TRUE(dropped_op.get()->add(R"({"id":"0","title":"discard"})").ok());
     store->flush();
-    ASSERT_TRUE(store->compact_all().ok());
+    auto db = store->_get_db_unsafe();
+    rocksdb::CompactRangeOptions options;
+    options.change_level = true;
+    options.target_level = 6;
+    ASSERT_TRUE(db->CompactRange(options, nullptr, nullptr).ok());
+    // Create whole SST files inside the dropped ranges, above the mixed bottom file.
+    for(const auto& prefix : {"0_", "2_"}) {
+        ASSERT_TRUE(db->Put({}, std::string(prefix) + "reclaim", "discard").ok());
+        ASSERT_TRUE(store->flush().ok());
+        rocksdb::ColumnFamilyMetaData metadata;
+        db->GetColumnFamilyMetaData(&metadata);
+        std::vector<std::string> files;
+        for(const auto& file : metadata.levels[0].files) {
+            files.push_back(file.name);
+        }
+        ASSERT_TRUE(db->CompactFiles({}, files, 1).ok());
+    }
+    rocksdb::ColumnFamilyMetaData before;
+    db->GetColumnFamilyMetaData(&before);
+    std::set<std::string> reclaim_files;
+    for(const auto& level : before.levels) {
+        for(const auto& file : level.files) {
+            if((file.smallestkey >= "0_" && file.largestkey < "0`") ||
+               (file.smallestkey >= "2_" && file.largestkey < "2`")) {
+                reclaim_files.insert(file.name);
+            }
+        }
+    }
+    ASSERT_EQ(2, reclaim_files.size());
     ASSERT_TRUE(collectionManager.drop_collection("collection1", true, false).ok());
     ASSERT_TRUE(collectionManager.drop_collection("dropped", true, false).ok());
 
+    const auto sequence = db->GetLatestSequenceNumber();
+    auto dry_run = collectionManager.compact_dropped_collections(true);
+    ASSERT_TRUE(dry_run.ok()) << dry_run.error();
+    ASSERT_EQ(2, dry_run.get()["dropped_id_count"]);
+    ASSERT_EQ(0, dry_run.get()["ranges_processed"]);
+    ASSERT_EQ(sequence, db->GetLatestSequenceNumber());
     auto op = collectionManager.compact_dropped_collections();
     ASSERT_TRUE(op.ok()) << op.error();
     ASSERT_EQ(2, op.get()["ranges_processed"]);
@@ -115,13 +149,13 @@ TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     EXPECT_EQ("0`", op.get()["ranges"][0]["end"]);
     EXPECT_EQ("2_", op.get()["ranges"][1]["begin"]);
     EXPECT_EQ("2`", op.get()["ranges"][1]["end"]);
-    std::unique_ptr<rocksdb::Iterator> iter(store->get_iterator());
-    for(const auto& prefix : {"0_", "2_"}) {
-        iter->Seek(prefix);
-        EXPECT_FALSE(iter->Valid() && iter->key().starts_with(prefix));
+    rocksdb::ColumnFamilyMetaData after;
+    db->GetColumnFamilyMetaData(&after);
+    for(const auto& level : after.levels) {
+        for(const auto& file : level.files) {
+            EXPECT_EQ(0, reclaim_files.count(file.name));
+        }
     }
-    ASSERT_TRUE(iter->status().ok());
-    iter.reset();
     ASSERT_EQ(1, live->get_num_documents());
     auto search = live->search("survivor", {"title"}, "", {}, {}, {0}, 10, 1, FREQUENCY, {false});
     ASSERT_TRUE(search.ok()) << search.error();
@@ -129,23 +163,20 @@ TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     ASSERT_EQ("survivor", search.get()["hits"][0]["document"]["title"]);
     ASSERT_EQ("survivor", live->get("0").get()["title"]);
 
-    // A recreated name gets a fresh ID; adjacent dropped IDs can now merge.
+    // A recreated name gets a fresh ID, outside every planned deletion range.
     auto recreated = collectionManager.create_collection("dropped", 1, fields);
     ASSERT_TRUE(recreated.ok());
     ASSERT_EQ(3, recreated.get()->get_collection_id());
+    ASSERT_TRUE(recreated.get()->add(R"({"id":"0","title":"new survivor"})").ok());
     ASSERT_TRUE(collectionManager.drop_collection("live", true, false).ok());
 
-    // A dropped range's tombstone can be in a file wholly inside the merged range,
+    // A dropped range's tombstone can be in a file wholly inside the collection range,
     // while older values remain in a bottom-level file shared with a live collection.
-    auto db = store->_get_db_unsafe();
     ASSERT_TRUE(db->Put({}, "0_old", "discard").ok());
     ASSERT_TRUE(db->Put({}, "3_kept", "keep").ok());
-    rocksdb::CompactRangeOptions options;
-    options.change_level = true;
-    options.target_level = 6;
     ASSERT_TRUE(db->CompactRange(options, nullptr, nullptr).ok());
     auto snapshot = db->GetSnapshot();
-    ASSERT_TRUE(db->DeleteRange({}, db->DefaultColumnFamily(), "0_", "0`").ok());
+    ASSERT_TRUE(db->DeleteRange({}, db->DefaultColumnFamily(), "0_a", "0_z").ok());
     store->flush();
     rocksdb::ColumnFamilyMetaData metadata;
     db->GetColumnFamilyMetaData(&metadata);
@@ -160,12 +191,18 @@ TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     ASSERT_TRUE(db->Get({}, "0_old", &value).IsNotFound());
     op = collectionManager.compact_dropped_collections();
     ASSERT_TRUE(op.ok()) << op.error();
-    ASSERT_EQ(1, op.get()["ranges_processed"]);
+    ASSERT_EQ(3, op.get()["dropped_id_count"]);
+    ASSERT_GE(op.get()["ranges_processed"].get<size_t>(), 1);
     EXPECT_EQ("0_", op.get()["ranges"][0]["begin"]);
-    EXPECT_EQ("2`", op.get()["ranges"][0]["end"]);
+    EXPECT_EQ("0`", op.get()["ranges"][0]["end"]);
+    EXPECT_EQ("2`", op.get()["ranges"][2]["end"]);
     EXPECT_TRUE(db->Get({}, "0_old", &value).IsNotFound());
     ASSERT_TRUE(db->Get({}, "3_kept", &value).ok());
     EXPECT_EQ("keep", value);
+    search = recreated.get()->search("survivor", {"title"}, "", {}, {}, {0}, 10, 1, FREQUENCY, {false});
+    ASSERT_TRUE(search.ok()) << search.error();
+    ASSERT_EQ(1, recreated.get()->get_num_documents());
+    ASSERT_EQ(1, search.get()["found"]);
 }
 
 TEST_F(CollectionManagerTest, CollectionCreation) {
