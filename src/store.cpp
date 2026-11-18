@@ -1,4 +1,5 @@
 #include "include/store.h"
+#include <rocksdb/convenience.h>
 
 Store::Store(const std::string & state_dir_path, const size_t wal_ttl_secs, const size_t wal_size_mb, bool disable_wal,
              int32_t ttl, size_t write_buffer_size,size_t max_write_buffer_number, size_t max_log_file_size,
@@ -308,6 +309,25 @@ rocksdb::Status Store::delete_range(const std::string& begin_key, const std::str
 rocksdb::Status Store::compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) {
     std::shared_lock lock(mutex);
     return db->CompactRange(rocksdb::CompactRangeOptions(), &begin_key, &end_key);
+}
+
+rocksdb::Status Store::compact_dropped_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) {
+    std::shared_lock lock(mutex);
+    auto status = rocksdb::DeleteFilesInRange(db, db->DefaultColumnFamily(), &begin_key, &end_key, false);
+    if(!status.ok()) {
+        return status;
+    }
+    // Deleted files can contain tombstones hiding older keys in mixed SSTs that survived.
+    status = db->DeleteRange(write_options, db->DefaultColumnFamily(), begin_key, end_key);
+    if(!status.ok()) {
+        return status;
+    }
+    return db->CompactRange(rocksdb::CompactRangeOptions(), &begin_key, &end_key);
+}
+
+bool Store::get_live_sst_files_size(uint64_t& bytes) const {
+    std::shared_lock lock(mutex);
+    return db->GetIntProperty("rocksdb.live-sst-files-size", &bytes);
 }
 
 rocksdb::DB* Store::_get_db_unsafe() const {

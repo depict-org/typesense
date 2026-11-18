@@ -148,6 +148,8 @@ public:
 
     uint32_t get_next_collection_id() const;
 
+    Option<nlohmann::json> compact_dropped_collections();
+
     static std::string get_symlink_key(const std::string & symlink_name);
 
     static std::string get_preset_key(const std::string & preset_name);
