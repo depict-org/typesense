@@ -73,6 +73,58 @@ protected:
     }
 };
 
+TEST_F(CollectionVectorTest, IdenticalVectorsT1Reachability) {
+    auto coll = collectionManager.create_collection(R"({"name":"identical","fields":[
+        {"name":"vec","type":"float[]","num_dim":16}]})"_json).get();
+    std::mt19937 rng(7);
+    std::normal_distribution<float> random(0, 1);
+    auto unit_vector = [&]() {
+        std::vector<float> values(16), normalized(16);
+        for (auto& value : values) value = random(rng);
+        hnsw_index_t::normalize_vector(values, normalized);
+        return normalized;
+    };
+    auto a = unit_vector(), b = unit_vector();
+    std::vector<std::vector<float>> vectors(1600);
+    for (size_t i = 0; i < vectors.size(); ++i) vectors[i] = i < 1000 ? a : i < 1500 ? b : unit_vector();
+    for (size_t pass = 0; pass < 2; ++pass) {
+        if (pass) {
+            for (auto* group : {&a, &b}) {
+                auto direction = unit_vector();
+                for (size_t d = 0; d < 16; ++d) (*group)[d] += 1e-5f * direction[d];
+                auto old = *group;
+                hnsw_index_t::normalize_vector(old, *group);
+            }
+            for (size_t i = 0; i < 1500; ++i) vectors[i] = i < 1000 ? a : b;
+        }
+        std::vector<std::string> records;
+        for (size_t i = 0; i < vectors.size(); ++i)
+            records.push_back(nlohmann::json({{"id", std::to_string(i)}, {"vec", vectors[i]}}).dump());
+        nlohmann::json document;
+        auto imported = coll->add_many(records, document, UPSERT);
+        ASSERT_TRUE(imported["success"].get<bool>()) << imported;
+        ASSERT_EQ(1600, imported["num_imported"]);
+        if (!pass) EXPECT_EQ(102, coll->_get_index()->_get_vector_index().at("vec")->vecdex->getCurrentElementCount());
+        std::map<std::string, std::string> params = {{"collection", "identical"}, {"q", "*"},
+            {"vector_query", "vec:(" + nlohmann::json(a).dump() + ",k:1600,ef:1600,flat_search_cutoff:0)"},
+            {"per_page", "250"}, {"exclude_fields", "vec"}};
+        std::set<std::string> ids;
+        for (size_t page = 1; page <= 7; ++page) {
+            params["page"] = std::to_string(page);
+            std::string response;
+            nlohmann::json embedded;
+            auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            auto result = collectionManager.do_search(params, embedded, response, now);
+            ASSERT_TRUE(result.ok()) << result.error();
+            auto found = nlohmann::json::parse(response);
+            EXPECT_EQ(1600, found["found"]);
+            for (auto& hit : found["hits"]) EXPECT_TRUE(ids.insert(hit["document"]["id"].get<std::string>()).second);
+        }
+        EXPECT_EQ(1600, ids.size());
+    }
+}
+
 TEST_F(CollectionVectorTest, FilteredHybridMaterializationPreservesHnswAdmission) {
     auto schema = R"({
         "name": "filtered_hybrid",
