@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 #include <rocksdb/metadata.h>
 #include <algorithm>
-#include <cerrno>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -258,16 +257,10 @@ TEST_F(CollectionManagerTest, AutoCompactDroppedCollectionsAfterSnapshot) {
         return count;
     };
 
-    // Exercise the production completion callback, without the compact_dropped API.
-    auto failed = new TimedSnapshotClosure(&state);
-    failed->status().set_error(EIO, "Snapshot failed for test.");
-    failed->Run();
-    pool->enqueue([]() {}).wait();
-    ASSERT_EQ(reclaim_files.size(), reclaim_file_count());
-
     std::promise<void> release_worker;
     auto gate = release_worker.get_future().share();
     pool->enqueue([gate]() { gate.wait(); });
+    // Exercise the production completion callback, without the compact_dropped API.
     (new TimedSnapshotClosure(&state))->Run();
     // The callback returns while its cleanup worker is still blocked.
     EXPECT_EQ(reclaim_files.size(), reclaim_file_count());

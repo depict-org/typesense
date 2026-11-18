@@ -977,27 +977,10 @@ void ReplicationState::set_snapshot_in_progress(const bool snapshot_in_progress)
 
 void ReplicationState::compact_dropped_collections_after_snapshot() {
     // This pool is joined before CollectionManager and Store are disposed.
-    // Keep cleanup outside the snapshot callback and the state machine's apply/pause locks.
     thread_pool->enqueue([]() {
-        const auto started = std::chrono::steady_clock::now();
-        auto& manager = CollectionManager::get_instance();
-        const auto files_before = manager.get_store()->get_sst_file_count();
-        const auto result = manager.compact_dropped_collections(false, false);
-        const auto files_after = manager.get_store()->get_sst_file_count();
-        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - started).count();
-        // Live file counts can also change due to concurrent RocksDB compactions.
-        if(result.ok()) {
-            const auto stats = result.get();
-            LOG(INFO) << "Automatic dropped collection cleanup: ranges=" << stats["dropped_id_count"]
-                      << " processed=" << stats["ranges_processed"]
-                      << " files_before=" << files_before << " files_after=" << files_after
-                      << " elapsed_ms=" << elapsed_ms;
-        } else {
-            LOG(WARNING) << "Automatic dropped collection cleanup: ranges=unknown"
-                         << " files_before=" << files_before << " files_after=" << files_after
-                         << " elapsed_ms=" << elapsed_ms << " code=" << result.code()
-                         << " error=" << result.error();
+        const auto result = CollectionManager::get_instance().compact_dropped_collections(false, false);
+        if(!result.ok()) {
+            LOG(WARNING) << "Automatic dropped collection cleanup failed: " << result.error();
         }
     });
 }

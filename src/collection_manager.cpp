@@ -1003,6 +1003,7 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
     if(compact) {
         response["compaction_free_disk_floor_bytes"] = Store::COMPACTION_FREE_DISK_FLOOR_BYTES;
     }
+    size_t ranges_with_data = 0;
     for(uint32_t id = 0; id < next_id; ++id) {
         if(live_ids.count(id)) {
             continue;
@@ -1014,8 +1015,7 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
         }
         response["ranges"].push_back({{"id", id}, {"begin", begin}, {"end", end},
                                       {"approximate_sst_bytes", estimate.get()}});
-        LOG(INFO) << "Dropped collection cleanup id=" << id << " approximate_sst_bytes=" << estimate.get()
-                  << " dry_run=" << dry_run << " compact=" << compact;
+        ranges_with_data += estimate.get() != 0;
         if(!dry_run && estimate.get() == 0) {
             response["ranges_skipped_empty"] = response["ranges_skipped_empty"].get<size_t>() + 1;
         } else if(!dry_run) {
@@ -1038,8 +1038,8 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
     response["duration_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started).count();
     LOG(INFO) << "Dropped collection cleanup summary: dry_run=" << dry_run
-              << " ranges=" << response["dropped_id_count"] << " processed=" << response["ranges_processed"]
-              << " skipped_empty=" << response["ranges_skipped_empty"] << " duration_ms=" << response["duration_ms"];
+              << " dropped_ids_seen=" << response["dropped_id_count"] << " ranges_with_data=" << ranges_with_data
+              << " elapsed_ms=" << response["duration_ms"];
     return Option<nlohmann::json>(response);
 }
 

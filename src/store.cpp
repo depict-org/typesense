@@ -1,6 +1,5 @@
 #include "include/store.h"
 #include <rocksdb/convenience.h>
-#include <rocksdb/metadata.h>
 #include <sys/statvfs.h>
 
 Store::Store(const std::string & state_dir_path, const size_t wal_ttl_secs, const size_t wal_size_mb, bool disable_wal,
@@ -346,13 +345,6 @@ Option<uint64_t> Store::get_approximate_range_size(const rocksdb::Slice& begin_k
         return Option<uint64_t>(500, status.ToString());
     }
     return Option<uint64_t>(bytes);
-}
-
-size_t Store::get_sst_file_count() const {
-    std::shared_lock lock(mutex);
-    rocksdb::ColumnFamilyMetaData metadata;
-    db->GetColumnFamilyMetaData(&metadata);
-    return metadata.file_count;
 }
 
 rocksdb::DB* Store::_get_db_unsafe() const {
