@@ -198,6 +198,9 @@ TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     EXPECT_EQ("0_", op.get()["ranges"][0]["begin"]);
     EXPECT_EQ("0`", op.get()["ranges"][0]["end"]);
     EXPECT_EQ("2`", op.get()["ranges"][2]["end"]);
+    const auto sequence_after_cleanup = db->GetLatestSequenceNumber();
+    ASSERT_TRUE(collectionManager.compact_dropped_collections().ok());
+    ASSERT_EQ(sequence_after_cleanup, db->GetLatestSequenceNumber());
     EXPECT_TRUE(db->Get({}, "0_old", &value).IsNotFound());
     ASSERT_TRUE(db->Get({}, "3_kept", &value).ok());
     EXPECT_EQ("keep", value);

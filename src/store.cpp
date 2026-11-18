@@ -324,9 +324,17 @@ rocksdb::Status Store::compact_dropped_range(const rocksdb::Slice& begin_key, co
             return rocksdb::Status::IOError("Compaction requires at least 64 GiB free before each range.");
         }
     }
+    rocksdb::Range range(begin_key, end_key);
+    uint64_t bytes_before = 0, bytes_after = 0;
+    const bool measured_before = db->GetApproximateSizes(&range, 1, &bytes_before).ok();
     auto status = rocksdb::DeleteFilesInRange(db, db->DefaultColumnFamily(), &begin_key, &end_key, false);
     if(!status.ok()) {
         return status;
+    }
+    // No file was deleted, so existing tombstones still cover the remaining keys.
+    if(!compact && measured_before && db->GetApproximateSizes(&range, 1, &bytes_after).ok() &&
+       bytes_after == bytes_before) {
+        return rocksdb::Status::OK();
     }
     // Deleted files can contain tombstones hiding older keys in mixed SSTs that survived.
     status = db->DeleteRange(write_options, db->DefaultColumnFamily(), begin_key, end_key);
