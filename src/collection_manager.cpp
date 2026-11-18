@@ -958,16 +958,21 @@ Option<nlohmann::json> CollectionManager::drop_collection(const std::string& col
         const auto collection_id = collection->get_collection_id();
         // The replication pool is joined before the manager and store are disposed.
         replication_thread_pool->enqueue([store = store, collection_id]() {
-            const auto started = std::chrono::steady_clock::now();
-            auto status = store->flush();
-            if(status.ok()) {
-                status = store->compact_range(std::to_string(collection_id) + "_",
-                                              std::to_string(collection_id) + "`", false);
+            try {
+                const auto started = std::chrono::steady_clock::now();
+                auto status = store->flush();
+                if(status.ok()) {
+                    status = store->compact_range(std::to_string(collection_id) + "_",
+                                                  std::to_string(collection_id) + "`");
+                }
+                const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started).count();
+                LOG(INFO) << "Dropped collection compaction: collection_id=" << collection_id
+                          << ", elapsed_ms=" << elapsed_ms << ", status=" << status.ToString();
+            } catch(const std::exception& e) {
+                LOG(ERROR) << "Dropped collection compaction: collection_id=" << collection_id
+                           << ", error=" << e.what();
             }
-            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started).count();
-            LOG(INFO) << "Dropped collection compaction: collection_id=" << collection_id
-                      << ", elapsed_ms=" << elapsed_ms << ", status=" << status.ToString();
         });
     }
 

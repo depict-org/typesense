@@ -115,8 +115,7 @@ public:
 
     rocksdb::Status delete_range(const std::string& begin_key, const std::string& end_key);
 
-    rocksdb::Status compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key,
-                                 bool exclusive_manual_compaction = true);
+    rocksdb::Status compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key);
 
     // Only for internal tests
     rocksdb::DB* _get_db_unsafe() const;

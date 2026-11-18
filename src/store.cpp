@@ -305,12 +305,9 @@ rocksdb::Status Store::delete_range(const std::string& begin_key, const std::str
     return db->DeleteRange(rocksdb::WriteOptions(), db->DefaultColumnFamily(), begin_key, end_key);
 }
 
-rocksdb::Status Store::compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key,
-                                    bool exclusive_manual_compaction) {
+rocksdb::Status Store::compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) {
     std::shared_lock lock(mutex);
-    rocksdb::CompactRangeOptions options;
-    options.exclusive_manual_compaction = exclusive_manual_compaction;
-    return db->CompactRange(options, &begin_key, &end_key);
+    return db->CompactRange(rocksdb::CompactRangeOptions(), &begin_key, &end_key);
 }
 
 rocksdb::DB* Store::_get_db_unsafe() const {
