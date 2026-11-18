@@ -74,8 +74,9 @@ protected:
 };
 
 TEST_F(CollectionVectorTest, IdenticalVectorsT1Reachability) {
-    auto coll = collectionManager.create_collection(R"({"name":"identical","fields":[
-        {"name":"vec","type":"float[]","num_dim":16}]})"_json).get();
+    auto schema = R"({"name":"identical","fields":[
+        {"name":"vec","type":"float[]","num_dim":16}]})"_json;
+    auto coll = collectionManager.create_collection(schema).get();
     std::mt19937 rng(7);
     std::normal_distribution<float> random(0, 1);
     auto unit_vector = [&]() {
@@ -104,7 +105,9 @@ TEST_F(CollectionVectorTest, IdenticalVectorsT1Reachability) {
         auto imported = coll->add_many(records, document, UPSERT);
         ASSERT_TRUE(imported["success"].get<bool>()) << imported;
         ASSERT_EQ(1600, imported["num_imported"]);
-        if (!pass) EXPECT_EQ(102, coll->_get_index()->_get_vector_index().at("vec")->vecdex->getCurrentElementCount());
+        if (!pass) {
+            EXPECT_EQ(102, coll->_get_index()->_get_vector_index().at("vec")->vecdex->getCurrentElementCount());
+        }
         std::map<std::string, std::string> params = {{"collection", "identical"}, {"q", "*"},
             {"vector_query", "vec:(" + nlohmann::json(a).dump() + ",k:1600,ef:1600,flat_search_cutoff:0)"},
             {"per_page", "250"}, {"exclude_fields", "vec"}};
