@@ -117,6 +117,10 @@ public:
 
     rocksdb::Status compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key);
 
+    rocksdb::Status compact_dropped_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key);
+
+    bool get_live_sst_files_size(uint64_t& bytes) const;
+
     // Only for internal tests
     rocksdb::DB* _get_db_unsafe() const;
 

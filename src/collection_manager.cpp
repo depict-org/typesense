@@ -1,4 +1,5 @@
 #include <string>
+#include <chrono>
 #include <vector>
 #include <json.hpp>
 #include <app_metrics.h>
@@ -961,6 +962,75 @@ Option<nlohmann::json> CollectionManager::drop_collection(const std::string& col
 
 uint32_t CollectionManager::get_next_collection_id() const {
     return next_collection_id;
+}
+
+Option<nlohmann::json> CollectionManager::compact_dropped_collections() {
+    const auto started = std::chrono::steady_clock::now();
+    // Searches also take shared locks. Keep allocation/registration out while deriving and processing ranges.
+    std::shared_lock lock(mutex);
+    std::set<uint32_t> live_ids;
+    for(const auto& entry : collection_id_names) {
+        live_ids.insert(entry.first);
+    }
+
+    // create_collection persists metadata before releasing the lock to construct/register the collection.
+    const std::string meta_prefix = std::string(Collection::COLLECTION_META_PREFIX) + "_";
+    std::unique_ptr<rocksdb::Iterator> iter(store->get_iterator());
+    for(iter->Seek(meta_prefix); iter->Valid() && iter->key().starts_with(meta_prefix); iter->Next()) {
+        auto meta = nlohmann::json::parse(iter->value().ToString(), nullptr, false);
+        if(meta.is_discarded() || !meta.contains(Collection::COLLECTION_ID_KEY) ||
+           !meta[Collection::COLLECTION_ID_KEY].is_number_unsigned()) {
+            return Option<nlohmann::json>(500, "Invalid collection metadata while identifying dropped collections.");
+        }
+        live_ids.insert(meta[Collection::COLLECTION_ID_KEY].get<uint32_t>());
+    }
+    if(!iter->status().ok()) {
+        return Option<nlohmann::json>(500, iter->status().ToString());
+    }
+    iter.reset();  // Do not pin SST files during reclamation.
+
+    std::vector<std::pair<std::string, bool>> prefixes;
+    const uint32_t next_id = next_collection_id;
+    for(uint32_t id = 0; id < next_id; ++id) {
+        prefixes.emplace_back(std::to_string(id), live_ids.count(id) != 0);
+    }
+    // Sort by actual key order: e.g. 10_ precedes 1_. Numeric adjacency is unsafe.
+    std::sort(prefixes.begin(), prefixes.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.first + "_" < rhs.first + "_";
+    });
+    std::vector<std::pair<std::string, std::string>> ranges;
+    bool extend_range = false;
+    for(const auto& prefix : prefixes) {
+        if(prefix.second) {
+            extend_range = false;
+        } else {
+            if(extend_range) {
+                ranges.back().second = prefix.first + "`";
+            } else {
+                ranges.emplace_back(prefix.first + "_", prefix.first + "`");
+            }
+            extend_range = true;
+        }
+    }
+
+    uint64_t bytes_before = 0, bytes_after = 0;
+    const bool have_bytes_before = store->get_live_sst_files_size(bytes_before);
+    nlohmann::json processed = nlohmann::json::array();
+    for(const auto& range : ranges) {
+        auto status = store->compact_dropped_range(range.first, range.second);
+        if(!status.ok()) {
+            return Option<nlohmann::json>(500, status.ToString());
+        }
+        processed.push_back({{"begin", range.first}, {"end", range.second}});
+    }
+    nlohmann::json response = {{"success", true}, {"ranges_processed", ranges.size()}, {"ranges", processed},
+        {"duration_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count()}};
+    if(have_bytes_before && store->get_live_sst_files_size(bytes_after)) {
+        response["bytes_before"] = bytes_before;
+        response["bytes_after"] = bytes_after;
+    }
+    return Option<nlohmann::json>(response);
 }
 
 std::string CollectionManager::get_symlink_key(const std::string & symlink_name) {

@@ -2457,6 +2457,16 @@ bool post_compact_db(const std::shared_ptr<http_req>& req, const std::shared_ptr
     return true;
 }
 
+bool post_compact_dropped_db(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res) {
+    auto op = CollectionManager::get_instance().compact_dropped_collections();
+    if(op.ok()) {
+        res->set_200(op.get().dump());
+    } else {
+        res->set(op.code(), op.error());
+    }
+    return true;
+}
+
 bool post_reset_peers(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res) {
     res->status_code = 200;
     res->content_type_header = "application/json";
