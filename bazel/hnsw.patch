@@ -1,0 +1,81 @@
+diff --git a/hnswlib/hnswalg.h b/hnswlib/hnswalg.h
+index ca3f08d..92c0e79 100644
+--- a/hnswlib/hnswalg.h
++++ b/hnswlib/hnswalg.h
+@@ -10,2 +10,6 @@
+ #include <list>
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
+ 
+@@ -381,3 +385,3 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
+             std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &top_candidates,
+-    const size_t M) {
++    const size_t M, tableint owner) {
+         if (top_candidates.size() < M) {
+@@ -393,11 +397,34 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
+ 
+-        while (queue_closest.size()) {
++        const dist_t owner_self_distance = fstdistfunc_(
++                getDataByInternalId(owner), getDataByInternalId(owner), dist_func_param_);
++        std::vector<std::pair<dist_t, tableint>> ordered_candidates;
++        while (!queue_closest.empty()) {
++            ordered_candidates.push_back(queue_closest.top());
++            queue_closest.pop();
++        }
++        auto duplicates_end = std::stable_partition(ordered_candidates.begin(), ordered_candidates.end(),
++                [&](const auto& candidate) { return std::abs(-candidate.first - owner_self_distance) <= 1e-6; });
++        // Symmetric splitmix64 ordering avoids every owner choosing the same duplicate ids.
++        auto duplicate_order = [owner](tableint neighbor) {
++            uint64_t mixed = (uint64_t(std::max(owner, neighbor)) << 32) | std::min(owner, neighbor);
++            mixed += 0x9e3779b97f4a7c15ULL;
++            mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ULL;
++            mixed = (mixed ^ (mixed >> 27)) * 0x94d049bb133111ebULL;
++            return mixed ^ (mixed >> 31);
++        };
++        std::sort(ordered_candidates.begin(), duplicates_end, [&](const auto& left, const auto& right) {
++            return duplicate_order(left.second) < duplicate_order(right.second);
++        });
++        // Keep bridges outside the duplicate group; duplicates need no diversity pruning.
++        const size_t duplicates_kept = std::min<size_t>(duplicates_end - ordered_candidates.begin(), M - M / 4);
++        return_list.insert(return_list.end(), ordered_candidates.begin(), ordered_candidates.begin() + duplicates_kept);
++        for (auto candidate = duplicates_end; candidate != ordered_candidates.end(); ++candidate) {
+             if (return_list.size() >= M)
+                 break;
+-            std::pair<dist_t, tableint> curent_pair = queue_closest.top();
++            std::pair<dist_t, tableint> curent_pair = *candidate;
+             dist_t dist_to_query = -curent_pair.first;
+-            queue_closest.pop();
+             bool good = true;
+ 
+-            for (std::pair<dist_t, tableint> second_pair : return_list) {
++            for (size_t selected = duplicates_kept; selected < return_list.size(); ++selected) {
++                const auto& second_pair = return_list[selected];
+                 dist_t curdist =
+@@ -449,3 +476,3 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
+         size_t Mcurmax = level ? maxM_ : maxM0_;
+-        getNeighborsByHeuristic2(top_candidates, M_);
++        getNeighborsByHeuristic2(top_candidates, M_, cur_c);
+         if (top_candidates.size() > M_)
+@@ -530,3 +557,3 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
+ 
+-                    getNeighborsByHeuristic2(candidates, Mcurmax);
++                    getNeighborsByHeuristic2(candidates, Mcurmax, selectedNeighbors[idx]);
+ 
+@@ -862,2 +889,10 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
+         std::unique_lock <std::mutex> lock_label(getLabelOpMutex(label));
++        {
++            std::unique_lock<std::mutex> lock_table(label_lookup_lock);
++            auto existing = label_lookup_.find(label);
++            if (existing != label_lookup_.end() && !isMarkedDeleted(existing->second) &&
++                std::memcmp(getDataByInternalId(existing->second), data_point, data_size_) == 0) {
++                return;  // Unchanged live vectors must not rewire or consume a tombstone.
++            }
++        }
+         if (!replace_deleted) {
+@@ -961,3 +996,3 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
+                 // Retrieve neighbours using heuristic and set connections.
+-                getNeighborsByHeuristic2(candidates, layer == 0 ? maxM0_ : maxM_);
++                getNeighborsByHeuristic2(candidates, layer == 0 ? maxM0_ : maxM_, neigh);
+ 

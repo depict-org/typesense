@@ -186,6 +186,8 @@ new_git_repository(
 new_git_repository(
     name = "hnsw",
     build_file = "//bazel:hnsw.BUILD",
+    patches = ["//bazel:hnsw.patch"],
+    patch_args = ["-p1"],
     commit = "687d981753f8bafcd16421cbd2a166d0b62bc520",
     remote = "https://github.com/typesense/hnswlib.git",
 )
