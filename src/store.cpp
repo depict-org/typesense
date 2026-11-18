@@ -271,10 +271,10 @@ int Store::reload(bool clear_state_dir, const std::string& snapshot_path, int32_
     return 0;
 }
 
-void Store::flush() {
+rocksdb::Status Store::flush() {
     std::shared_lock lock(mutex);
     rocksdb::FlushOptions options;
-    db->Flush(options);
+    return db->Flush(options);
 }
 
 rocksdb::Status Store::compact_all() {
@@ -305,9 +305,12 @@ rocksdb::Status Store::delete_range(const std::string& begin_key, const std::str
     return db->DeleteRange(rocksdb::WriteOptions(), db->DefaultColumnFamily(), begin_key, end_key);
 }
 
-rocksdb::Status Store::compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) {
+rocksdb::Status Store::compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key,
+                                    bool exclusive_manual_compaction) {
     std::shared_lock lock(mutex);
-    return db->CompactRange(rocksdb::CompactRangeOptions(), &begin_key, &end_key);
+    rocksdb::CompactRangeOptions options;
+    options.exclusive_manual_compaction = exclusive_manual_compaction;
+    return db->CompactRange(options, &begin_key, &end_key);
 }
 
 rocksdb::DB* Store::_get_db_unsafe() const {

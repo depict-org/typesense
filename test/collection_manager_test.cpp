@@ -1,4 +1,7 @@
 #include <gtest/gtest.h>
+#include <rocksdb/metadata.h>
+#include <chrono>
+#include <set>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -91,6 +94,79 @@ protected:
         delete analytic_store;
     }
 };
+
+TEST_F(CollectionManagerTest, DropCompactsAsynchronously) {
+    auto dropped = collectionManager.create_collection("dropped", 1,
+        {field("title", field_types::STRING, false)});
+    ASSERT_TRUE(dropped.ok());
+    const auto id = std::to_string(dropped.get()->get_collection_id());
+    const auto prefix = id + "_";
+    const auto end = id + "`";
+    auto db = store->_get_db_unsafe();
+    ASSERT_TRUE(store->flush().ok());
+    rocksdb::CompactRangeOptions options;
+    options.change_level = true;
+    options.target_level = 6;
+    ASSERT_TRUE(db->CompactRange(options, nullptr, nullptr).ok());
+    ASSERT_TRUE(db->Put({}, prefix + "reclaim", "discard").ok());
+    ASSERT_TRUE(store->flush().ok());
+    rocksdb::ColumnFamilyMetaData metadata;
+    db->GetColumnFamilyMetaData(&metadata);
+    std::vector<std::string> files;
+    for(const auto& file : metadata.levels[0].files) {
+        files.push_back(file.name);
+    }
+    ASSERT_FALSE(files.empty());
+    ASSERT_TRUE(db->CompactFiles({}, files, 1).ok());
+    db->GetColumnFamilyMetaData(&metadata);
+    std::set<std::string> reclaim_files;
+    for(const auto& level : metadata.levels) {
+        for(const auto& file : level.files) {
+            if(file.smallestkey >= prefix && file.largestkey < end) {
+                reclaim_files.insert(file.name);
+            }
+        }
+    }
+    ASSERT_FALSE(reclaim_files.empty());
+    auto reclaim_file_count = [&]() {
+        rocksdb::ColumnFamilyMetaData current;
+        db->GetColumnFamilyMetaData(&current);
+        size_t count = 0;
+        for(const auto& level : current.levels) {
+            for(const auto& file : level.files) {
+                count += reclaim_files.count(file.name);
+            }
+        }
+        return count;
+    };
+
+    auto app_pool = collectionManager.get_thread_pool();
+    auto shutdown_pool = [&](ThreadPool* pool) {
+        pool->shutdown();
+        collectionManager.init(store, app_pool, 1.0, "auth_key", quit);
+        delete pool;
+    };
+    std::unique_ptr<ThreadPool, decltype(shutdown_pool)> pool(new ThreadPool(1), shutdown_pool);
+    collectionManager.init(store, app_pool, 1.0, "auth_key", quit,
+                           Config::FILTER_BY_DEFAULT_OPERATIONS, pool.get());
+    std::promise<void> release_worker;
+    auto gate = release_worker.get_future().share();
+    pool->enqueue([gate]() { gate.wait(); });
+
+    auto result = collectionManager.drop_collection("dropped", true, true);
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(nullptr, collectionManager.get_collection("dropped"));
+    std::string value;
+    EXPECT_TRUE(db->Get({}, prefix + "reclaim", &value).IsNotFound());
+    EXPECT_EQ(StoreStatus::NOT_FOUND, store->get(Collection::get_meta_key("dropped"), value));
+    // Inline compaction removes these files even while the pool is blocked.
+    EXPECT_EQ(reclaim_files.size(), reclaim_file_count());
+    release_worker.set_value();
+    auto drained = pool->enqueue([]() {});
+    EXPECT_EQ(std::future_status::ready, drained.wait_for(std::chrono::seconds(10)));
+    EXPECT_EQ(0, reclaim_file_count());
+    EXPECT_NE(nullptr, collectionManager.get_collection("collection1"));
+}
 
 TEST_F(CollectionManagerTest, CollectionCreation) {
     CollectionManager & collectionManager2 = CollectionManager::get_instance();

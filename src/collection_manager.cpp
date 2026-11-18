@@ -303,11 +303,13 @@ void CollectionManager::init(Store *store, ThreadPool* thread_pool,
                              const float max_memory_ratio,
                              const std::string & auth_key,
                              std::atomic<bool>& quit,
-                             const uint16_t& filter_by_max_operations) {
+                             const uint16_t& filter_by_max_operations,
+                             ThreadPool* replication_thread_pool) {
     std::unique_lock lock(mutex);
 
     this->store = store;
     this->thread_pool = thread_pool;
+    this->replication_thread_pool = replication_thread_pool;
     this->bootstrap_auth_key = auth_key;
     this->max_memory_ratio = max_memory_ratio;
     this->quit = &quit;
@@ -912,11 +914,6 @@ Option<nlohmann::json> CollectionManager::drop_collection(const std::string& col
         const std::string& del_end_prefix = std::to_string(collection->get_collection_id()) + "`";
         store->delete_range(del_key_prefix, del_end_prefix);
 
-        if(compact_store) {
-            store->flush();
-            store->compact_range(del_key_prefix, del_end_prefix);
-        }
-
         store->remove(Collection::get_next_seq_id_key(actual_coll_name));
         store->remove(Collection::get_meta_key(actual_coll_name));
     }
@@ -954,6 +951,24 @@ Option<nlohmann::json> CollectionManager::drop_collection(const std::string& col
         if (embedding_field.embed.count(fields::personalization_type) == 0) {
             process_embedding_field_delete(model_name);
         }
+    }
+
+    // Tests without a replication pool do not schedule background store work.
+    if(remove_from_store && compact_store && replication_thread_pool != nullptr) {
+        const auto collection_id = collection->get_collection_id();
+        // The replication pool is joined before the manager and store are disposed.
+        replication_thread_pool->enqueue([store = store, collection_id]() {
+            const auto started = std::chrono::steady_clock::now();
+            auto status = store->flush();
+            if(status.ok()) {
+                status = store->compact_range(std::to_string(collection_id) + "_",
+                                              std::to_string(collection_id) + "`", false);
+            }
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            LOG(INFO) << "Dropped collection compaction: collection_id=" << collection_id
+                      << ", elapsed_ms=" << elapsed_ms << ", status=" << status.ToString();
+        });
     }
 
     return Option<nlohmann::json>(collection_json);
