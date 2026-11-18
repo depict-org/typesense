@@ -91,16 +91,12 @@ export class TypesenseProcessManager {
     return this.waitForHealth(port);
   }
 
-  async startMultiNode() {
-    const clusterStr = [
-      `${this.ipAddress}:5107:5108`,
-      `${this.ipAddress}:6107:6108`,
-      `${this.ipAddress}:7107:7108`,
-    ].join(",");
+  async startMultiNode(nodes: (typeof TypesenseProcessManager.multiNodeConfigs[number] & { extraArgs?: string[] })[] = TypesenseProcessManager.multiNodeConfigs) {
+    const clusterStr = nodes.map(node => `${this.ipAddress}:${node.peerPort}:${node.port}`).join(",");
 
     writeFileSync(this.nodesFile, clusterStr);
 
-    for (const node of TypesenseProcessManager.multiNodeConfigs) {
+    for (const [index, node] of nodes.entries()) {
       const args = [
         `--nodes=${this.nodesFile}`,
         `--peering-address=${this.ipAddress}`,
@@ -112,12 +108,15 @@ export class TypesenseProcessManager {
         `--log-dir=${join(this.baseDir, "logs", node.logDir)}`,
         `--analytics-dir=${join(this.baseDir, node.analyticsDir)}`,
         ...TypesenseProcessManager.additionalConfigs,
+        ...(node.extraArgs ?? []),
       ];
       this.spawnServer(node.name, args, node.port);
+      // Establish a leader in the first majority before starting the remaining members.
+      if (index === Math.floor(nodes.length / 2)) await this.waitForHealth(nodes[0]!.port);
     }
-    await this.waitForHealth(5108);
-    await this.electLeader();
-    for (const node of TypesenseProcessManager.multiNodeConfigs) {
+    await this.waitForHealth(nodes[0]!.port);
+    await this.electLeader(nodes[0]!.port);
+    for (const node of nodes) {
       await this.waitForHealth(node.port);
     }
   }
@@ -143,8 +142,8 @@ export class TypesenseProcessManager {
     await this.startMultiNode();
   }
 
-  async electLeader() {
-    const res = await fetch(`http://localhost:5108/operations/vote`, {
+  async electLeader(port: number = 5108) {
+    const res = await fetch(`http://localhost:${port}/operations/vote`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
