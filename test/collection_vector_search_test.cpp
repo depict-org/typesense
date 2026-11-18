@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <random>
+#include <set>
+#include <stdexcept>
 #include <collection_manager.h>
 #include "collection.h"
 #include <cstdlib>
@@ -21,6 +25,18 @@ protected:
 
     std::vector<std::string> query_fields;
     std::vector<sort_by> sort_fields;
+    nlohmann::json vector_search(const std::string& name, const std::string& query,
+                                std::map<std::string, std::string> params = {}) {
+        params.insert({{"q", "*"}, {"per_page", "250"}});
+        params["collection"] = name;
+        params["vector_query"] = query;
+        std::string response;
+        nlohmann::json embedded;
+        auto now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        auto result = collectionManager.do_search(params, embedded, response, now);
+        if (!result.ok()) throw std::runtime_error(result.error());
+        return nlohmann::json::parse(response);
+    }
     void setupCollection() {
         std::string state_dir_path = "/tmp/typesense_test/collection_vector_search";
         LOG(INFO) << "Truncating and creating: " << state_dir_path;
@@ -126,6 +142,81 @@ TEST_F(CollectionVectorTest, IdenticalVectorsT1Reachability) {
         }
         EXPECT_EQ(1600, ids.size());
     }
+}
+
+TEST_F(CollectionVectorTest, IdenticalVectorsT2FilterDistanceAndPages) {
+    auto schema = R"({"name":"filtered_identical","fields":[{"name":"vec","type":"float[]","num_dim":16},
+        {"name":"in_stock","type":"bool"},{"name":"ordinal","type":"int32"}]})"_json;
+    auto coll = collectionManager.create_collection(schema).get();
+    std::vector<float> a(16, 0); a[0] = 1;
+    std::vector<std::string> records;
+    std::map<std::string, float> expected;
+    for (size_t i = 0; i < 350; ++i) {
+        auto values = a;
+        if (i >= 300) { values[0] = (i - 299) * 0.001f; values[1] = 1; }
+        records.push_back(nlohmann::json({{"id", std::to_string(i)}, {"vec", values},
+            {"in_stock", i % 2 == 0}, {"ordinal", i}}).dump());
+        if (i % 2 == 0) {
+            std::vector<float> normalized(16);
+            hnsw_index_t::normalize_vector(values, normalized);
+            expected[std::to_string(i)] = 1 - normalized[0];
+        }
+    }
+    nlohmann::json document;
+    ASSERT_TRUE(coll->add_many(records, document)["success"].get<bool>());
+    auto query = [&](size_t k) { return "vec:(" + nlohmann::json(a).dump() + ",ef:350,flat_search_cutoff:0,k:" + std::to_string(k) + ")"; };
+    std::map<std::string, std::string> params = {{"filter_by", "in_stock:true"}, {"sort_by", "_vector_distance:asc,ordinal:asc"}};
+    auto all = vector_search("filtered_identical", query(350), params);
+    ASSERT_EQ(expected.size(), all["found"]);
+    ASSERT_EQ(expected.size(), all["hits"].size());
+    std::set<std::string> observed;
+    for (const auto& hit : all["hits"]) {
+        auto id = hit["document"]["id"].get<std::string>();
+        ASSERT_TRUE(expected.count(id));
+        EXPECT_TRUE(observed.insert(id).second);
+        EXPECT_NEAR(expected.at(id), hit["vector_distance"].get<float>(), 1e-6);
+    }
+    params["per_page"] = "10";
+    auto first = vector_search("filtered_identical", query(10), params);
+    ASSERT_EQ(10, first["hits"].size());
+    for (size_t i = 0; i < 10; ++i) EXPECT_EQ(std::to_string(i * 2), first["hits"][i]["document"]["id"]);
+    // k caps total candidates; request 20 to check the next ten on page two.
+    params["page"] = "2";
+    auto second = vector_search("filtered_identical", query(20), params);
+    ASSERT_EQ(10, second["hits"].size());
+    for (size_t i = 0; i < 10; ++i) EXPECT_EQ(std::to_string((i + 10) * 2), second["hits"][i]["document"]["id"]);
+}
+
+TEST_F(CollectionVectorTest, IdenticalVectorsT3SharedPointLifecycle) {
+    auto schema = R"({"name":"lifecycle","fields":[{"name":"vec","type":"float[]","num_dim":16}]})"_json;
+    auto coll = collectionManager.create_collection(schema).get();
+    std::vector<float> a(16, 0), b(16, 0); a[0] = 1; b[1] = 1;
+    std::vector<std::string> records;
+    for (size_t i = 0; i < 200; ++i) records.push_back(nlohmann::json({{"id", std::to_string(i)}, {"vec", a}}).dump());
+    nlohmann::json document;
+    ASSERT_TRUE(coll->add_many(records, document)["success"].get<bool>());
+    auto search = [&](const std::vector<float>& values) { return vector_search("lifecycle", "vec:(" +
+        nlohmann::json(values).dump() + ",k:200,ef:200,flat_search_cutoff:0,distance_threshold:0.1)"); };
+    ASSERT_TRUE(coll->remove("0").ok());
+    auto result = search(a);
+    EXPECT_EQ(199, result["found"]);
+    for (const auto& hit : result["hits"]) EXPECT_NE("0", hit["document"]["id"]);
+    ASSERT_TRUE(coll->add(nlohmann::json({{"id", "1"}, {"vec", b}}).dump(), UPSERT).ok());
+    result = search(a);
+    EXPECT_EQ(198, result["found"]);
+    for (const auto& hit : result["hits"]) EXPECT_NE("1", hit["document"]["id"]);
+    result = search(b);
+    ASSERT_EQ(1, result["hits"].size());
+    EXPECT_EQ("1", result["hits"][0]["document"]["id"]);
+    EXPECT_NEAR(0, result["hits"][0]["vector_distance"].get<float>(), 1e-6);
+    ASSERT_TRUE(coll->add(nlohmann::json({{"id", "1"}, {"vec", a}}).dump(), UPSERT).ok());
+    EXPECT_EQ(199, search(a)["found"]);
+    for (size_t i = 1; i < 200; ++i) ASSERT_TRUE(coll->remove(std::to_string(i)).ok());
+    EXPECT_EQ(0, search(a)["found"]);
+    ASSERT_TRUE(coll->add(nlohmann::json({{"id", "new"}, {"vec", a}}).dump()).ok());
+    result = search(a);
+    ASSERT_EQ(1, result["hits"].size());
+    EXPECT_EQ("new", result["hits"][0]["document"]["id"]);
 }
 
 TEST_F(CollectionVectorTest, FilteredHybridMaterializationPreservesHnswAdmission) {
