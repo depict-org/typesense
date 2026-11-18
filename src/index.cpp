@@ -2,6 +2,8 @@
 #include "request_waits.h"
 
 #include <memory>
+#include <cstring>
+#include <future>
 #include <atomic>
 #include <numeric>
 #include <chrono>
@@ -723,6 +725,134 @@ size_t Index::batch_memory_index(Index *index,
     return num_indexed;
 }
 
+void hnsw_index_t::remove(uint32_t seq_id) {
+    auto document = seq_to_point.find(seq_id);
+    if (document == seq_to_point.end()) return;
+    const auto point_id = document->second;
+    auto& point = point_to_members.at(point_id);
+    point.members.erase(seq_id);
+    seq_to_point.erase(document);
+    if (!point.members.empty()) return;
+    if (point.indexed) vecdex->markDelete(point_id);
+    auto hash = hash_to_point.find(point.hash);
+    if (hash != hash_to_point.end() && hash->second == point_id) hash_to_point.erase(hash);
+    point_to_members.erase(point_id);
+}
+
+std::vector<float> hnsw_index_t::get_vector(uint32_t seq_id) const {
+    auto document = seq_to_point.find(seq_id);
+    if (document == seq_to_point.end()) throw std::runtime_error("Label not found");
+    return vecdex->getDataByLabel<float>(document->second);
+}
+
+std::vector<std::pair<float, size_t>> hnsw_index_t::search(const float* query, size_t k, size_t ef,
+                                                        VectorFilterFunctor& filter) const {
+    PointFilterFunctor point_filter(*this, filter);
+    auto nearest = vecdex->searchKnnCloserFirst(query, k, ef, &point_filter);
+    std::vector<std::pair<float, size_t>> documents;
+    for (const auto& point : nearest) {
+        auto members = point_to_members.find(point.second);
+        if (members == point_to_members.end()) continue;
+        for (auto seq_id : members->second.members)
+            if (filter(seq_id)) documents.emplace_back(point.first, seq_id);
+    }
+    std::sort(documents.begin(), documents.end());
+    if (documents.size() > k) documents.resize(k);
+    return documents;
+}
+
+void hnsw_index_t::index_batch(std::vector<index_record>& records, const field& vector_field, ThreadPool* thread_pool) {
+    struct prepared_t { std::vector<float> values; uint64_t hash = 0; };
+    std::vector<prepared_t> prepared(records.size());
+    auto parallel = [&](size_t count, auto work) {
+        const size_t window = std::max<size_t>(1, (count + 3) / 4);
+        std::vector<std::future<void>> tasks;
+        for (size_t begin = 0; begin < count; begin += window)
+            tasks.push_back(thread_pool->enqueue([&, begin, count, window]() {
+                for (size_t i = begin; i < std::min(count, begin + window); ++i) work(i);
+            }));
+        for (auto& task : tasks) task.get();
+    };
+    // Independent parsing, normalization and hashing retain the four worker windows.
+    parallel(records.size(), [&](size_t i) {
+        auto& record = records[i];
+        if (!record.indexed.ok() || !record.doc.count(vector_field.name)) return;
+        try {
+            auto values = record.doc[vector_field.name].get<std::vector<float>>();
+            if (values.size() != num_dim) {
+                if (!(vector_field.optional && values.empty())) record.index_failure(400, "Vector size mismatch.");
+                return;
+            }
+            prepared[i].values.resize(num_dim);
+            if (distance_type == cosine) normalize_vector(values, prepared[i].values);
+            else prepared[i].values = std::move(values);
+            prepared[i].hash = StringUtils::hash_wy(prepared[i].values.data(), num_dim * sizeof(float));
+        } catch (const std::exception& error) { record.index_failure(400, error.what()); }
+    });
+    // Searches wait on the caller's Index write lock throughout all three phases.
+    std::unordered_map<uint64_t, size_t> pending;
+    auto matches = [&](uint64_t point_id, const std::vector<float>& values) {
+        auto changed = pending.find(point_id);
+        auto stored = changed == pending.end() ? vecdex->getDataByLabel<float>(point_id) : prepared[changed->second].values;
+        return std::memcmp(stored.data(), values.data(), num_dim * sizeof(float)) == 0;
+    };
+    for (size_t i = 0; i < records.size(); ++i) {
+        if (prepared[i].values.empty() || !records[i].indexed.ok()) continue;
+        auto seq_id = records[i].seq_id;
+        auto old = seq_to_point.find(seq_id);
+        if (old != seq_to_point.end() && matches(old->second, prepared[i].values)) continue;
+        auto equal = hash_to_point.find(prepared[i].hash);
+        uint64_t point_id;
+        if (equal != hash_to_point.end() && matches(equal->second, prepared[i].values)) {
+            point_id = equal->second;
+            remove(seq_id);
+        } else if (old != seq_to_point.end() && point_to_members.at(old->second).members.size() == 1) {
+            point_id = old->second;
+            auto hash = hash_to_point.find(point_to_members.at(point_id).hash);
+            if (hash != hash_to_point.end() && hash->second == point_id) hash_to_point.erase(hash);
+            point_to_members.at(point_id).hash = prepared[i].hash;
+            pending[point_id] = i;
+        } else {
+            remove(seq_id);
+            point_id = next_point_id++;
+            point_to_members.emplace(point_id, point_t{{}, prepared[i].hash});
+            pending[point_id] = i;
+        }
+        seq_to_point[seq_id] = point_id;
+        point_to_members.at(point_id).members.insert(seq_id);
+        hash_to_point.emplace(prepared[i].hash, point_id); // A hash collision never bypasses memcmp.
+    }
+    std::vector<std::pair<uint64_t, size_t>> writes;
+    size_t new_points = 0;
+    for (auto point : pending) {
+        auto live = point_to_members.find(point.first);
+        if (live == point_to_members.end()) continue; // Created and emptied in this batch.
+        writes.push_back(point);
+        new_points += !live->second.indexed;
+    }
+    std::sort(writes.begin(), writes.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+    auto required = vecdex->getCurrentElementCount() + new_points;
+    if (required > vecdex->getMaxElements()) vecdex->resizeIndex(required * 1.3);
+    struct failure_t { bool failed = false; std::string message; };
+    std::vector<failure_t> failures(writes.size());
+    parallel(writes.size(), [&](size_t i) {
+        try { vecdex->addPoint(prepared[writes[i].second].values.data(), writes[i].first, true); }
+        catch (const std::exception& error) { failures[i] = {true, error.what()}; }
+    });
+    for (size_t i = 0; i < writes.size(); ++i) {
+        const auto point_id = writes[i].first;
+        auto& point = point_to_members.at(point_id);
+        if (!failures[i].failed) { point.indexed = true; continue; }
+        // addPoint can register a label before throwing; retire any partial graph entry too.
+        auto graph_point = vecdex->label_lookup_.find(point_id);
+        point.indexed = graph_point != vecdex->label_lookup_.end() && !vecdex->isMarkedDeleted(graph_point->second);
+        for (auto& record : records)
+            if (point.members.count(record.seq_id)) record.index_failure(400, failures[i].message);
+        const auto members = point.members;
+        for (auto seq_id : members) remove(seq_id);
+    }
+}
+
 void Index::index_field_in_memory(const std::string& collection_name, const field& afield,
                                   std::vector<index_record>& iter_batch) {
     // indexes a given field of all documents in the batch
@@ -1021,77 +1151,7 @@ void Index::index_field_in_memory(const std::string& collection_name, const fiel
         } else if(afield.is_array()) {
             // handle vector index first
             if(afield.type == field_types::FLOAT_ARRAY && afield.num_dim > 0) {
-                auto vec_index = vector_index[afield.name]->vecdex;
-                size_t curr_ele_count = vec_index->getCurrentElementCount();
-                if(curr_ele_count + iter_batch.size() > vec_index->getMaxElements()) {
-                    vec_index->resizeIndex((curr_ele_count + iter_batch.size()) * 1.3);
-                }
-
-                const size_t num_threads = std::min<size_t>(4, iter_batch.size());
-                const size_t window_size = (num_threads == 0) ? 0 :
-                                           (iter_batch.size() + num_threads - 1) / num_threads;  // rounds up
-                size_t num_processed = 0;
-                std::mutex m_process;
-                std::condition_variable cv_process;
-
-                size_t num_queued = 0;
-                size_t result_index = 0;
-
-                for(size_t thread_id = 0; thread_id < num_threads && result_index < iter_batch.size(); thread_id++) {
-                    size_t batch_len = window_size;
-
-                    if(result_index + window_size > iter_batch.size()) {
-                        batch_len = iter_batch.size() - result_index;
-                    }
-
-                    num_queued++;
-
-                    thread_pool->enqueue([thread_id, &afield, &vec_index, &records = iter_batch,
-                                          result_index, batch_len, &num_processed, &m_process, &cv_process]() {
-
-                        size_t batch_counter = 0;
-                        while(batch_counter < batch_len) {
-                            auto& record = records[result_index + batch_counter];
-                            if(record.doc.count(afield.name) == 0 || !record.indexed.ok()) {
-                                batch_counter++;
-                                continue;
-                            }
-
-                            try {
-                                const std::vector<float>& float_vals = record.doc[afield.name].get<std::vector<float>>();
-                                if(float_vals.size() != afield.num_dim) {
-                                    if(afield.optional && float_vals.empty()) {
-                                        // skip empty vector
-                                        batch_counter++;
-                                        continue;
-                                    }
-                                    record.index_failure(400, "Vector size mismatch.");
-                                } else {
-                                    if(afield.vec_dist == cosine) {
-                                        std::vector<float> normalized_vals(afield.num_dim);
-                                        hnsw_index_t::normalize_vector(float_vals, normalized_vals);
-                                        vec_index->addPoint(normalized_vals.data(), (size_t)record.seq_id, true);
-                                    } else {
-                                        vec_index->addPoint(float_vals.data(), (size_t)record.seq_id, true);
-                                    }
-                                }
-                            } catch(const std::exception &e) {
-                                record.index_failure(400, e.what());
-                            }
-
-                            batch_counter++;
-                        }
-
-                        std::unique_lock<std::mutex> lock(m_process);
-                        num_processed++;
-                        cv_process.notify_one();
-                    });
-
-                    result_index += batch_len;
-                }
-
-                std::unique_lock<std::mutex> lock_process(m_process);
-                cv_process.wait(lock_process, [&](){ return num_processed == num_queued; });
+                vector_index[afield.name]->index_batch(iter_batch, afield, thread_pool);
                 return;
             }
 
@@ -3396,7 +3456,7 @@ void process_results_bruteforce(filter_result_iterator_t* filter_result_iterator
         std::vector<float> values;
 
         try {
-            values = field_vector_index->vecdex->getDataByLabel<float>(seq_id);
+            values = field_vector_index->get_vector(seq_id);
         } catch (...) {
             // likely not found
             continue;
@@ -3439,9 +3499,9 @@ void process_results_hnsw_index(filter_result_iterator_t* filter_result_iterator
     if(field_vector_index->distance_type == cosine) {
         std::vector<float> normalized_q(vector_query.values.size());
         hnsw_index_t::normalize_vector(vector_query.values, normalized_q);
-        pairs = field_vector_index->vecdex->searchKnnCloserFirst(normalized_q.data(), k, vector_query.ef, &filterFunctor);
+        pairs = field_vector_index->search(normalized_q.data(), k, vector_query.ef, filterFunctor);
     } else {
-        pairs = field_vector_index->vecdex->searchKnnCloserFirst(vector_query.values.data(), k, vector_query.ef, &filterFunctor);
+        pairs = field_vector_index->search(vector_query.values.data(), k, vector_query.ef, filterFunctor);
     }
 
     std::sort(pairs.begin(), pairs.end(), [](auto& x, auto& y) {
@@ -5866,7 +5926,7 @@ Option<bool> Index::compute_sort_scores(const std::vector<sort_by>& sort_fields,
         } else if(field_values[i] == &vector_query_sentinel_value) {
             scores[i] = float_to_int64_t(2.0f);
             try {
-                const auto& values = sort_fields[i].vector_query.vector_index->vecdex->getDataByLabel<float>(seq_id);
+                const auto& values = sort_fields[i].vector_query.vector_index->get_vector(seq_id);
                 const auto& dist_func = sort_fields[i].vector_query.vector_index->space->get_dist_func();
                 float dist = dist_func(sort_fields[i].vector_query.query.values.data(), values.data(), &sort_fields[i].vector_query.vector_index->num_dim);
 
@@ -7519,7 +7579,7 @@ void Index::remove_field(uint32_t seq_id, nlohmann::json& document, const std::s
     } else if(search_field.num_dim) {
         if(!is_update) {
             // since vector index supports upsert natively, we should not attempt to delete for update
-            vector_index[search_field.name]->vecdex->markDelete(seq_id);
+            vector_index[search_field.name]->remove(seq_id);
         }
     } else if(search_field.is_float()) {
         const std::vector<float>& values = search_field.is_single_float() ?
@@ -8962,7 +9022,7 @@ void Index::compute_aux_scores(Topster<KV>* topster, const std::vector<search_fi
             auto &field_vector_index = vector_index.at(vector_query.field_name);
 
             try {
-                values = field_vector_index->vecdex->getDataByLabel<float>(kv.second->key);
+                values = field_vector_index->get_vector(kv.second->key);
             } catch (...) {
                 // likely not found
                 continue;
