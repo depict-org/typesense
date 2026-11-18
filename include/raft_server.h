@@ -216,6 +216,8 @@ public:
 
     void set_snapshot_in_progress(const bool snapshot_in_progress);
 
+    void compact_dropped_collections_after_snapshot();
+
     // for timed snapshots
     void do_snapshot(const std::string& nodes);
 

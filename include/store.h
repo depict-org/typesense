@@ -124,6 +124,8 @@ public:
 
     Option<uint64_t> get_approximate_range_size(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) const;
 
+    size_t get_sst_file_count() const;
+
     // Only for internal tests
     rocksdb::DB* _get_db_unsafe() const;
 

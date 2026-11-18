@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include <rocksdb/metadata.h>
+#include <algorithm>
+#include <cerrno>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -11,6 +13,7 @@
 #include "synonym_index_manager.h"
 #include "curation_index_manager.h"
 #include "search_analytics.h"
+#include "raft_server.h"
 
 class CollectionManagerTest : public ::testing::Test {
 protected:
@@ -203,6 +206,75 @@ TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     ASSERT_TRUE(search.ok()) << search.error();
     ASSERT_EQ(1, recreated.get()->get_num_documents());
     ASSERT_EQ(1, search.get()["found"]);
+}
+
+TEST_F(CollectionManagerTest, AutoCompactDroppedCollectionsAfterSnapshot) {
+    auto dropped = collectionManager.create_collection("dropped", 1,
+        {field("title", field_types::STRING, false)});
+    ASSERT_TRUE(dropped.ok());
+    const auto id = std::to_string(dropped.get()->get_collection_id());
+    const auto prefix = id + "_";
+    auto db = store->_get_db_unsafe();
+    ASSERT_TRUE(store->flush().ok());
+    rocksdb::CompactRangeOptions options;
+    options.change_level = true;
+    options.target_level = 6;
+    ASSERT_TRUE(db->CompactRange(options, nullptr, nullptr).ok());
+    ASSERT_TRUE(db->Put({}, prefix + "reclaim", "discard").ok());
+    ASSERT_TRUE(store->flush().ok());
+    rocksdb::ColumnFamilyMetaData metadata;
+    db->GetColumnFamilyMetaData(&metadata);
+    std::vector<std::string> files;
+    for(const auto& file : metadata.levels[0].files) {
+        files.push_back(file.name);
+    }
+    ASSERT_FALSE(files.empty());
+    ASSERT_TRUE(db->CompactFiles({}, files, 1).ok());
+    db->GetColumnFamilyMetaData(&metadata);
+    std::vector<std::string> reclaim_files;
+    for(const auto& level : metadata.levels) {
+        for(const auto& file : level.files) {
+            if(file.smallestkey >= prefix && file.largestkey < id + "`") {
+                reclaim_files.push_back(file.name);
+            }
+        }
+    }
+    ASSERT_FALSE(reclaim_files.empty());
+    ASSERT_TRUE(collectionManager.drop_collection("dropped", true, false).ok());
+
+    auto shutdown_pool = [](ThreadPool* pool) { pool->shutdown(); delete pool; };
+    std::unique_ptr<ThreadPool, decltype(shutdown_pool)> pool(new ThreadPool(1), shutdown_pool);
+    ReplicationState state(nullptr, nullptr, store, nullptr, pool.get(), nullptr, false,
+                           &Config::get_instance(), 8, 1000);
+    auto reclaim_file_count = [&]() {
+        rocksdb::ColumnFamilyMetaData current;
+        db->GetColumnFamilyMetaData(&current);
+        size_t count = 0;
+        for(const auto& level : current.levels) {
+            for(const auto& file : level.files) {
+                count += std::count(reclaim_files.begin(), reclaim_files.end(), file.name);
+            }
+        }
+        return count;
+    };
+
+    // Exercise the production completion callback, without the compact_dropped API.
+    auto failed = new TimedSnapshotClosure(&state);
+    failed->status().set_error(EIO, "Snapshot failed for test.");
+    failed->Run();
+    pool->enqueue([]() {}).wait();
+    ASSERT_EQ(reclaim_files.size(), reclaim_file_count());
+
+    std::promise<void> release_worker;
+    auto gate = release_worker.get_future().share();
+    pool->enqueue([gate]() { gate.wait(); });
+    (new TimedSnapshotClosure(&state))->Run();
+    // The callback returns while its cleanup worker is still blocked.
+    EXPECT_EQ(reclaim_files.size(), reclaim_file_count());
+    release_worker.set_value();
+    pool->enqueue([]() {}).wait();
+    EXPECT_EQ(0, reclaim_file_count());
+    EXPECT_TRUE(collectionManager.get_collection("collection1") != nullptr);
 }
 
 TEST_F(CollectionManagerTest, CollectionCreation) {

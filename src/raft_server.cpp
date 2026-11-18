@@ -975,6 +975,33 @@ void ReplicationState::set_snapshot_in_progress(const bool snapshot_in_progress)
     this->snapshot_in_progress = snapshot_in_progress;
 }
 
+void ReplicationState::compact_dropped_collections_after_snapshot() {
+    // This pool is joined before CollectionManager and Store are disposed.
+    // Keep cleanup outside the snapshot callback and the state machine's apply/pause locks.
+    thread_pool->enqueue([]() {
+        const auto started = std::chrono::steady_clock::now();
+        auto& manager = CollectionManager::get_instance();
+        const auto files_before = manager.get_store()->get_sst_file_count();
+        const auto result = manager.compact_dropped_collections(false, false);
+        const auto files_after = manager.get_store()->get_sst_file_count();
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        // Live file counts can also change due to concurrent RocksDB compactions.
+        if(result.ok()) {
+            const auto stats = result.get();
+            LOG(INFO) << "Automatic dropped collection cleanup: ranges=" << stats["dropped_id_count"]
+                      << " processed=" << stats["ranges_processed"]
+                      << " files_before=" << files_before << " files_after=" << files_after
+                      << " elapsed_ms=" << elapsed_ms;
+        } else {
+            LOG(WARNING) << "Automatic dropped collection cleanup: ranges=unknown"
+                         << " files_before=" << files_before << " files_after=" << files_after
+                         << " elapsed_ms=" << elapsed_ms << " code=" << result.code()
+                         << " error=" << result.error();
+        }
+    });
+}
+
 void ReplicationState::do_dummy_write() {
     std::shared_lock lock(node_mutex);
 
@@ -1221,6 +1248,7 @@ void TimedSnapshotClosure::Run() {
 
     if(status().ok()) {
         LOG(INFO) << "Timed snapshot succeeded!";
+        replication_state->compact_dropped_collections_after_snapshot();
     } else {
         LOG(ERROR) << "Timed snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
     }
@@ -1283,6 +1311,11 @@ void OnDemandSnapshotClosure::Run() {
 
     auto req_res = new async_req_res_t(req, res, true);
     replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+
+    // The member's Raft snapshot succeeded even if the optional external copy failed.
+    if(status().ok()) {
+        replication_state->compact_dropped_collections_after_snapshot();
+    }
 
     // wait for response to be sent
     res->wait();
