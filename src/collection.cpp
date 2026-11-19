@@ -2204,6 +2204,19 @@ Option<bool> Collection::init_index_search_args(collection_search_args_t& coll_a
         transcribed_query = query;
     }
 
+    const auto max_query_length = Config::get_instance().get_max_query_length();
+    if(max_query_length != 0) {
+        size_t query_length = 0;
+        for(unsigned char byte : query) {
+            query_length += (byte & 0xC0) != 0x80;
+        }
+        if(query_length > max_query_length) {
+            return Option<bool>(400, "`q` is " + std::to_string(query_length) +
+                " characters long; the maximum is " + std::to_string(max_query_length) +
+                " (server flag `max-query-length`).");
+        }
+    }
+
     bool ignored_missing_fields = false;
 
     for(size_t i = 0; i < raw_search_fields.size(); i++) {

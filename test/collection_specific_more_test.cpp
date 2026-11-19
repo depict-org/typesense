@@ -48,6 +48,43 @@ protected:
     }
 };
 
+TEST_F(CollectionSpecificMoreTest, QueryLongerThanMaxQueryLengthIsRejected) {
+    // Paris P1 2026-11-19: reject pasted text before tokenization, counting UTF-8 code points.
+    auto& config = Config::get_instance();
+    const auto previous_limit = config.get_max_query_length();
+    struct RestoreLimit {
+        Config& config;
+        uint32_t limit;
+        ~RestoreLimit() { config.set_max_query_length(limit); }
+    } restore{config, previous_limit};
+    config.set_max_query_length(2000);
+
+    auto* coll = collectionManager.create_collection("query_length", 1,
+        {field("title", field_types::STRING, false)}).get();
+    auto search = [&](const std::string& q) {
+        return coll->search(q, {"title"}, "", {}, {}, {0}, 10, 1, FREQUENCY, {false}, 0);
+    };
+
+    std::string query;
+    for(size_t i = 0; i < 2000; ++i) {
+        query += "ä";
+    }
+    ASSERT_TRUE(search(query).ok());
+    auto rejected = search(query + "ä");
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(400, rejected.code());
+    ASSERT_EQ("`q` is 2001 characters long; the maximum is 2000 (server flag `max-query-length`).",
+              rejected.error());
+
+    // A NUL must not hide the rest of a query from the length check.
+    rejected = search(std::string(1, '\0') + query);
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(400, rejected.code());
+    config.set_max_query_length(0);
+    ASSERT_TRUE(search(query + "ä").ok());
+    collectionManager.drop_collection("query_length");
+}
+
 TEST_F(CollectionSpecificMoreTest, MaxCandidatesShouldBeRespected) {
     std::vector<field> fields = {field("company", field_types::STRING, true)};
     Collection* coll1 = collectionManager.create_collection("coll1", 1, fields).get();

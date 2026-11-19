@@ -280,6 +280,10 @@ void Config::load_config_env() {
         this->max_per_page = std::stoi(get_env("TYPESENSE_MAX_PER_PAGE"));
     }
 
+    if(!get_env("TYPESENSE_MAX_QUERY_LENGTH").empty()) {
+        this->max_query_length = std::stoi(get_env("TYPESENSE_MAX_QUERY_LENGTH"));
+    }
+
     if(!get_env("TYPESENSE_MAX_GROUP_LIMIT").empty()) {
         this->max_group_limit = std::stoi(get_env("TYPESENSE_MAX_GROUP_LIMIT"));
     }
@@ -543,6 +547,10 @@ void Config::load_config_file(cmdline::parser& options) {
         this->max_per_page = reader.GetInteger("server", "max-per-page", 250);
     }
 
+    if(reader.Exists("server", "max-query-length")) {
+        this->max_query_length = reader.GetInteger("server", "max-query-length", 2000);
+    }
+
     if(reader.Exists("server", "max-group-limit")) {
         this->max_group_limit = reader.GetInteger("server", "max-group-limit", 99);
     }
@@ -770,6 +778,10 @@ void Config::load_config_cmd_args(cmdline::parser& options)  {
 
     if(options.exist("max-per-page")) {
         this->max_per_page = options.get<int>("max-per-page");
+    }
+
+    if(options.exist("max-query-length")) {
+        this->max_query_length = options.get<uint32_t>("max-query-length");
     }
 
     if(options.exist("max-group-limit")) {
