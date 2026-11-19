@@ -1,5 +1,4 @@
 import path from "path";
-import { isDeepStrictEqual } from "util";
 import type { TypesenseProcessManager } from "@/services/typesense-process";
 import type { ErrorWithMessage } from "@/utils/error";
 import type { IDockerComposeResult } from "docker-compose";
@@ -96,7 +95,12 @@ export class K6Benchmarks {
     const envVarString = this.buildK6EnvironmentVars(options.additionalVars);
     this.config.spinner.start(`Running ${name} benchmark\n`);
 
-    const command = ["run", envVarString, scriptPath, logger.getLevel() <= LogLevel.DEBUG ? "--quiet" : ""].join(" ");
+    const command = [
+      "run",
+      envVarString,
+      scriptPath,
+      logger.getLevel() <= LogLevel.DEBUG ? "--quiet" : "",
+    ].join(" ");
 
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -220,22 +224,17 @@ export class K6Benchmarks {
       const deadline = Date.now() + 60_000;
       let lastStatus = "no health response";
       let ready = false;
-      while (Date.now() < deadline) {
+      while (!ready && Date.now() < deadline) {
         try {
           const response = await fetch(`http://localhost:${this.config.port}/health`, {
             signal: AbortSignal.timeout(Math.min(1_000, deadline - Date.now())),
           });
           lastStatus = `HTTP ${response.status}`;
-          const health = (await response.json()) as { ok?: boolean };
-          lastStatus += `, ok=${String(health.ok)}`;
-          if (response.ok && health.ok === true) {
-            ready = true;
-            break;
-          }
+          ready = response.ok && ((await response.json()) as { ok?: boolean }).ok === true;
         } catch (error) {
           lastStatus = toErrorWithMessage(error).message;
         }
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        if (!ready) await new Promise((resolve) => setTimeout(resolve, 500));
       }
       if (!ready) {
         throw new Error(`Typesense on port ${this.config.port} not ready after 60s; last status: ${lastStatus}`);
@@ -245,21 +244,11 @@ export class K6Benchmarks {
       try {
         await client.collections().create(K6Benchmarks.COLLECTION_SCHEMA);
       } catch (error) {
-        if (!(error instanceof Error) || !("httpStatus" in error) || error.httpStatus !== 409) {
-          throw error;
-        }
+        if (!(error instanceof Error) || !("httpStatus" in error) || error.httpStatus !== 409) throw error;
         const existing = await client.collections(K6Benchmarks.COLLECTION_NAME).retrieve();
-        // A retry may have landed already. Reuse only the same, empty starting state.
-        if (
-          existing.num_documents !== 0 ||
-          !isDeepStrictEqual(
-            this.normalizeCollectionSchema(existing),
-            this.normalizeCollectionSchema(K6Benchmarks.COLLECTION_SCHEMA),
-          )
-        ) {
-          throw new Error(
-            "Benchmark collection songs already exists with a different schema or is not empty; use a clean data directory",
-          );
+        // CI uses a fresh data directory, so a conflict is our own retried create.
+        if (existing.num_documents !== 0) {
+          throw new Error("Benchmark collection songs already exists and is not empty; use a clean data directory");
         }
       }
     };
@@ -267,33 +256,6 @@ export class K6Benchmarks {
     return ResultAsync.fromPromise(create(), toErrorWithMessage).map(() => {
       this.config.spinner.succeed("Benchmark collection created");
     });
-  }
-
-  private normalizeCollectionSchema(schema: CollectionCreateSchema): unknown {
-    // Collection retrieval expands server defaults and includes runtime metadata.
-    return {
-      default_sorting_field: "",
-      token_separators: [],
-      symbols_to_index: [],
-      synonym_sets: [],
-      curation_sets: [],
-      ...Object.fromEntries(Object.entries(schema).filter(([key]) => !["created_at", "num_documents"].includes(key))),
-      fields: schema.fields
-        .map((field) => ({
-          facet: false,
-          optional: false,
-          index: true,
-          sort: field.type === "int64",
-          infix: false,
-          locale: "",
-          stem: false,
-          store: true,
-          truncate_len: 100,
-          stem_dictionary: "",
-          ...field,
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    };
   }
 
   private getSearchBenchmarkPath(): ResultAsync<string, ErrorWithMessage> {
