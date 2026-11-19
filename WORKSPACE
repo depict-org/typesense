@@ -42,18 +42,28 @@ git_repository(
 )
 
 
+# microsoft/onnxruntime 404 since 2026-11-18; same tree verified by the image recipe.
 new_git_repository(
     name="onnx_runtime",
-    branch= "rel-1.14.1",
+    commit = "c57cf374b67f72575546d7b4c69a1af4972e2b54",
     build_file = "//bazel:onnxruntime.BUILD",
-    remote= "https://github.com/microsoft/onnxruntime",
+    remote= "https://github.com/intel/onnxruntime.git",
     patches=["//bazel:onnx.patch"],
-    patch_cmds= ["git submodule sync && git submodule foreach  'git fetch --tags' && git submodule update --init --remote"]
+    patch_cmds = [
+        "git update-index --cacheinfo 160000,184492af172548edc76faa3922e5a8c6c62bce28,cmake/external/protobuf",
+        "git update-index --cacheinfo 160000,1ba785612a79fe749aa1e478336e534743372639,cmake/external/onnx",
+        "git update-index --cacheinfo 160000,b17f29a1d8e16998bd8a3bfa1f7f8c236d955a61,cmake/external/eigen",
+        "git update-index --cacheinfo 160000,a0448e5055e4740774e00d496f016d9fcd572200,cmake/external/libprotobuf-mutator",
+        "git update-index --cacheinfo 160000,d7b4130688bfa348392b921ab04015aa15c4f154,cmake/external/emsdk",
+        "git update-index --cacheinfo 160000,3859b3fd39fdb61761cfe8789e1f0c7d828a31e9,cmake/external/onnxruntime-extensions",
+        "git config submodule.cmake/external/onnxruntime-extensions.url https://github.com/ssk18/onnxruntime-extensions.git",
+        "git submodule update --init --recursive",
+    ]
 )
 
 new_git_repository(
     name="clip_tokenizer",
-    branch="master",
+    commit = "0ca1e2e2e7418108725eaa7fb93e029516ae63fa",
     remote="https://github.com/typesense/clip_tokenizer_cpp.git",
     build_file = "//bazel:clip_tokenizer.BUILD",
 )
@@ -61,7 +71,7 @@ new_git_repository(
 new_git_repository(
     name = "onnx_runtime_extensions",
     build_file = "//bazel:onnxruntime_extensions.BUILD",
-    remote = "https://github.com/microsoft/onnxruntime-extensions",
+    remote = "https://github.com/ssk18/onnxruntime-extensions.git",
     commit = "81e7799c69044c745239202085eb0a98f102937b",
     patches=["//bazel:onnx_ext.patch"],
 )
@@ -70,7 +80,7 @@ new_git_repository(
     name = "com_github_madler_zlib",
     build_file = "//bazel:zlib.BUILD",
     remote = "https://github.com/madler/zlib.git",
-    tag = "v1.2.12",
+    commit = "21767c654d31d2dccdde4330529775c6c5fd5389",
 )
 
 # new_git_repository(
@@ -83,7 +93,7 @@ new_git_repository(
 new_git_repository(
     name = "sentencepiece",
     build_file = "//bazel:sentencepiece.BUILD",
-    tag = "v0.1.98",
+    commit = "518c57c335534d495d40d95d70199e28b4c8ce2a",
     remote = "https://github.com/google/sentencepiece",
     patches = ["//bazel:sentencepiece.patch"],
     patch_args = ["-p1"]
@@ -130,7 +140,7 @@ git_repository(
     repo_mapping = {
         "@zlib": "@com_github_madler_zlib",
     },
-    tag = "v21.5",
+    commit = "ab840345966d0fa8e7100d771c92a73bfbadd25c",
 )
 
 http_archive(
@@ -208,7 +218,7 @@ new_git_repository(
     name = "rocksdb",
     build_file = "//bazel:rocksdb.BUILD",
     remote = "https://github.com/facebook/rocksdb.git",
-    tag = "v7.8.3",
+    commit = "bf2c335184de16a3cc1787fa97ef9f22f7114238",
 )
 
 http_archive(
@@ -256,13 +266,13 @@ new_git_repository(
     build_file = "//bazel/icu:BUILD",
     patches = ["//bazel/icu:icu.patch"],
     remote = "https://github.com/typesense/icu.git",
-    tag = "release-71-1-patch",
+    commit = "8063ea337490a0a216c30d58c2beb7315059eb7c",
 )
 
 git_repository(
     name = "com_google_googletest",
     remote = "https://github.com/google/googletest.git",
-    tag = "release-1.12.1",
+    commit = "58d77fa8070e8cec2dc1ed015d66b454c8d78850",
 )
 
 new_git_repository(
