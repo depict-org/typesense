@@ -116,6 +116,7 @@ void master_server_routes() {
     server->post("/operations/vote", post_vote, false, false);
     server->post("/operations/cache/clear", post_clear_cache, false, false);
     server->post("/operations/db/compact", post_compact_db, false, false);
+    server->post("/operations/db/compact_dropped", post_compact_dropped_db, false, false);
     server->post("/operations/reset_peers", post_reset_peers, false, false);
     server->get("/operations/schema_changes", get_schema_changes);
 
