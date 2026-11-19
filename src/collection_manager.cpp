@@ -964,7 +964,7 @@ uint32_t CollectionManager::get_next_collection_id() const {
     return next_collection_id;
 }
 
-Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_run, bool compact,
+Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_run,
         const std::function<void()>& after_plan) {
     static std::mutex operation_mutex;
     std::unique_lock flight(operation_mutex, std::try_to_lock);
@@ -972,18 +972,15 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
         return Option<nlohmann::json>(409, "Dropped collection cleanup is already running.");
     }
     const auto started = std::chrono::steady_clock::now();
-    std::set<uint32_t> live_ids;
-    uint32_t next_id;
-    {
-        std::shared_lock lock(mutex);
-        next_id = next_collection_id;
-        for(const auto& entry : collection_id_names) {
-            live_ids.insert(entry.first);
-        }
+    const auto reload_count = store->get_reload_count();
+    std::string next_id_value;
+    const auto next_id_status = store->get(NEXT_COLLECTION_ID_KEY, next_id_value);
+    if(next_id_status == StoreStatus::ERROR) {
+        return Option<nlohmann::json>(500, "Error while fetching the next collection id from the disk.");
     }
-
-    // Protect creations persisted before the snapshot but not yet registered in memory.
-    // scan_fill holds the Store lock for the scan, including iterator destruction.
+    const uint32_t next_id = next_id_status == StoreStatus::FOUND ? std::stoul(next_id_value) : 0;
+    std::set<uint32_t> live_ids;
+    // Build the plan from the Store; in-memory IDs may belong to the pre-reload database.
     std::vector<std::string> metadata;
     store->scan_fill(std::string(Collection::COLLECTION_META_PREFIX) + "_",
                      std::string(Collection::COLLECTION_META_PREFIX) + "`", metadata);
@@ -996,15 +993,13 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
         live_ids.insert(meta[Collection::COLLECTION_ID_KEY].get<uint32_t>());
     }
     if(after_plan) { after_plan(); } // Test-only hook to load a snapshot after planning.
-    nlohmann::json response = {{"success", true}, {"dry_run", dry_run}, {"compact", compact},
+    nlohmann::json response = {{"success", true}, {"dry_run", dry_run},
         {"dropped_id_count", 0}, {"ranges_processed", 0}, {"ranges_skipped_empty", 0},
         {"ranges", nlohmann::json::array()},
         {"size_estimate_source", "RocksDB GetApproximateSizes: SST byte estimates, not free disk"},
         {"space_reclamation_note", "Space returns after this member's next Raft snapshot. Restarting before then "
             "restores the old snapshot's hard-linked files; cleanup may need to run again."}};
-    if(compact) {
-        response["compaction_free_disk_floor_bytes"] = Store::COMPACTION_FREE_DISK_FLOOR_BYTES;
-    }
+    size_t ranges_with_data = 0;
     for(uint32_t id = 0; id < next_id; ++id) {
         if(live_ids.count(id)) {
             continue;
@@ -1016,12 +1011,14 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
         }
         response["ranges"].push_back({{"id", id}, {"begin", begin}, {"end", end},
                                       {"approximate_sst_bytes", estimate.get()}});
-        LOG(INFO) << "Dropped collection cleanup id=" << id << " approximate_sst_bytes=" << estimate.get()
-                  << " dry_run=" << dry_run << " compact=" << compact;
+        ranges_with_data += estimate.get() != 0;
         if(!dry_run && estimate.get() == 0) {
             response["ranges_skipped_empty"] = response["ranges_skipped_empty"].get<size_t>() + 1;
         } else if(!dry_run) {
-            auto status = store->compact_dropped_range(begin, end, compact);
+            auto status = store->compact_dropped_range(begin, end, reload_count);
+            if(status.IsAborted()) {
+                return Option<nlohmann::json>(409, "store reloaded during cleanup; run again");
+            }
             if(!status.ok()) {
                 LOG(ERROR) << "Dropped collection cleanup failed after " << response["ranges_processed"]
                            << " ranges: " << status.ToString();
@@ -1040,8 +1037,8 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
     response["duration_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started).count();
     LOG(INFO) << "Dropped collection cleanup summary: dry_run=" << dry_run
-              << " ranges=" << response["dropped_id_count"] << " processed=" << response["ranges_processed"]
-              << " skipped_empty=" << response["ranges_skipped_empty"] << " duration_ms=" << response["duration_ms"];
+              << " dropped_ids_seen=" << response["dropped_id_count"] << " ranges_with_data=" << ranges_with_data
+              << " elapsed_ms=" << response["duration_ms"];
     return Option<nlohmann::json>(response);
 }
 

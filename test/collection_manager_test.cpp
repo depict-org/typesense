@@ -118,7 +118,7 @@ TEST_F(CollectionManagerTest, CompactDroppedAbortsWhenSnapshotLoadsMidPass) {
         ASSERT_FALSE(live_file.empty());
     }
     ASSERT_TRUE(collectionManager.drop_collection("collection1", true, false).ok());
-    auto op = collectionManager.compact_dropped_collections(false, false, [&] {
+    auto op = collectionManager.compact_dropped_collections(false, [&] {
         ASSERT_EQ(0, store->reload(true, snapshot_path));
     });
     EXPECT_FALSE(op.ok());
@@ -247,6 +247,11 @@ TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     ASSERT_TRUE(search.ok()) << search.error();
     ASSERT_EQ(1, recreated.get()->get_num_documents());
     ASSERT_EQ(1, search.get()["found"]);
+
+    const auto sequence_after_cleanup = db->GetLatestSequenceNumber();
+    op = collectionManager.compact_dropped_collections();
+    ASSERT_TRUE(op.ok()) << op.error();
+    EXPECT_EQ(sequence_after_cleanup, db->GetLatestSequenceNumber());
 }
 
 TEST_F(CollectionManagerTest, CollectionCreation) {
