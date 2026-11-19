@@ -66,15 +66,15 @@ protected:
 
 TEST_F(CollectionSynonymsTest, SynonymReductionOnLongQueryKeepsCappedExpansions) {
     // Paris P1: the old 1500-token DP took about 7 GiB; shared suffixes keep this linear.
-    for(char c = 'a'; c <= 'i'; ++c) {
-        const auto suffix = std::string(1, c);
+    for(char synonym_letter = 'a'; synonym_letter <= 'i'; ++synonym_letter) {
+        const auto suffix = std::string(1, synonym_letter);
         nlohmann::json synonym = {{"id", "long-" + suffix},
             {"synonyms", {"root" + suffix, "alt" + suffix, "other" + suffix}}};
         ASSERT_TRUE(manager.upsert_synonym_item("index", synonym).ok());
     }
     std::vector<std::string> tokens(1491, "filler");
-    for(char c = 'a'; c <= 'i'; ++c) {
-        tokens.push_back("root" + std::string(1, c));
+    for(char synonym_letter = 'a'; synonym_letter <= 'i'; ++synonym_letter) {
+        tokens.push_back("root" + std::string(1, synonym_letter));
     }
     std::vector<std::vector<std::string>> results;
     const auto begin_us = std::chrono::duration_cast<std::chrono::microseconds>(

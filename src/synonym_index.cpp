@@ -38,17 +38,17 @@ bool SynonymIndex::synonym_reduction(const std::vector<std::string>& tokens,
             if(left == END || right == END) {
                 return left == END;
             }
-            const auto& l = nodes[left];
-            const auto& r = nodes[right];
-            if(l.final_cell != NO_CELL && l.final_cell == r.final_cell) {
-                return l.rank_in_cell < r.rank_in_cell;
+            const auto& left_node = nodes[left];
+            const auto& right_node = nodes[right];
+            if(left_node.final_cell != NO_CELL && left_node.final_cell == right_node.final_cell) {
+                return left_node.rank_in_cell < right_node.rank_in_cell;
             }
-            const auto cmp = l.token->compare(*r.token);
+            const auto cmp = left_node.token->compare(*right_node.token);
             if(cmp != 0) {
                 return cmp < 0;
             }
-            left = l.next;
-            right = r.next;
+            left = left_node.next;
+            right = right_node.next;
         }
         return false;
     };
