@@ -37,7 +37,7 @@ jobs:
 
           echo "Fetching workflow runs from $REPO_TO_CHECK..."
           RUNS_INFO=$(gh api -H "Accept: application/vnd.github+json" \
-            /repos/$REPO_TO_CHECK/actions/workflows/tests.yml/runs --paginate | \
+            "/repos/$REPO_TO_CHECK/actions/workflows/tests.yml/runs?branch=$DEFAULT_BRANCH&event=push&status=success&per_page=50" | \
             jq -sc --arg branch "$DEFAULT_BRANCH" '
               [.[].workflow_runs[] | select(.conclusion == "success" and .head_branch == $branch and .event == "push")]
               | reduce .[] as $run ([];
