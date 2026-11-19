@@ -196,8 +196,8 @@ Option<double> similarity_t::calculate(uint32_t seq_id_i, uint32_t seq_id_j, con
             const auto& field_vector_index = it->second;
             std::vector<float> values_i, values_j;
             try {
-                values_i = field_vector_index->vecdex->getDataByLabel<float>(seq_id_i);
-                values_j = field_vector_index->vecdex->getDataByLabel<float>(seq_id_j);
+                values_i = field_vector_index->get_vector(seq_id_i);
+                values_j = field_vector_index->get_vector(seq_id_j);
             } catch (...) {
                 // likely not found
                 continue;
