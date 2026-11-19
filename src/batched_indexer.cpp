@@ -1,7 +1,6 @@
 #include "batched_indexer.h"
 #include "core_api.h"
 #include "thread_local_vars.h"
-#include "cached_resource_stat.h"
 #include "collection_manager.h"
 
 BatchedIndexer::BatchedIndexer(HttpServer* server, Store* store, Store* meta_store, const size_t num_threads,
@@ -269,23 +268,7 @@ void BatchedIndexer::run() {
 
                     else {
                         //LOG(INFO) << "index req " << req_id << ", chunk index: " << orig_req_res.next_chunk_index;
-                        auto resource_check = cached_resource_stat_t::get_instance()
-                                              .has_enough_resources(config.get_data_dir(),
-                                                                    config.get_disk_used_max_percentage(),
-                                                                    config.get_memory_used_max_percentage());
-
-                        if (resource_check != cached_resource_stat_t::OK && orig_req->do_resource_check()) {
-                            const std::string& err_msg = "Rejecting write: running out of resource type: " +
-                                                          std::string(magic_enum::enum_name(resource_check));
-                            LOG(ERROR) << err_msg;
-                            orig_res->set_422(err_msg);
-                            orig_res->final = true;
-                            async_req_res_t* async_req_res = new async_req_res_t(orig_req, orig_res, true);
-                            server->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, async_req_res);
-                            goto end;
-                        }
-
-                        else if(route_found) {
+                        if(route_found) {
                             if(skip_writes && found_rpath->handler != post_config) {
                                 orig_res->set(422, "Skipping write.");
                                 orig_res->final = true;

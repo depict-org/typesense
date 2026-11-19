@@ -338,8 +338,12 @@ public:
                                 filter_result_iterator(filter_result_iterator),
                                 excluded_ids(excluded_ids), excluded_ids_length(excluded_ids_length) {}
 
+    bool is_unfiltered() const {
+        return filter_result_iterator->approx_filter_ids_length == 0 && excluded_ids_length == 0;
+    }
+
     bool operator()(hnswlib::labeltype id) override {
-        if (filter_result_iterator->approx_filter_ids_length == 0 && excluded_ids_length == 0) {
+        if (is_unfiltered()) {
             return true;
         }
 
@@ -361,6 +365,22 @@ struct hnsw_index_t {
     hnswlib::HierarchicalNSW<float>* vecdex;
     size_t num_dim;
     vector_distance_type_t distance_type;
+
+    struct point_t {
+        std::set<uint32_t> members;
+        uint64_t hash;
+        bool indexed = false;
+    };
+    std::unordered_map<uint32_t, uint64_t> seq_to_point;
+    std::unordered_map<uint64_t, point_t> point_to_members;
+    std::unordered_map<uint64_t, uint64_t> hash_to_point;
+    uint64_t next_point_id = 0;
+
+    void index_batch(std::vector<index_record>& records, const field& vector_field, ThreadPool* thread_pool);
+    void remove(uint32_t seq_id);
+    std::vector<float> get_vector(uint32_t seq_id) const;
+    std::vector<std::pair<float, size_t>> search(const float* query, size_t neighbor_count, size_t search_ef,
+                                               VectorFilterFunctor& filter) const;
 
     // ensures that this index is not dropped when it's being repaired
     std::mutex repair_m;
@@ -388,6 +408,20 @@ struct hnsw_index_t {
         for (size_t i = 0; i < src.size(); i++) {
             norm_dest[i] = src[i] * norm;
         }
+    }
+};
+
+class PointFilterFunctor: public hnswlib::BaseFilterFunctor {
+    const hnsw_index_t& index;
+    VectorFilterFunctor& filter;
+public:
+    PointFilterFunctor(const hnsw_index_t& index, VectorFilterFunctor& filter): index(index), filter(filter) {}
+    bool operator()(hnswlib::labeltype point_id) override {
+        auto point = index.point_to_members.find(point_id);
+        if (point == index.point_to_members.end()) return false;
+        if (filter.is_unfiltered()) return true;
+        for (auto seq_id : point->second.members) if (filter(seq_id)) return true;
+        return false;
     }
 };
 

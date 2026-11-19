@@ -1,4 +1,5 @@
 #include <string>
+#include <chrono>
 #include <vector>
 #include <json.hpp>
 #include <app_metrics.h>
@@ -961,6 +962,85 @@ Option<nlohmann::json> CollectionManager::drop_collection(const std::string& col
 
 uint32_t CollectionManager::get_next_collection_id() const {
     return next_collection_id;
+}
+
+Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_run, bool compact) {
+    static std::mutex operation_mutex;
+    std::unique_lock flight(operation_mutex, std::try_to_lock);
+    if(!flight.owns_lock()) {
+        return Option<nlohmann::json>(409, "Dropped collection cleanup is already running.");
+    }
+    const auto started = std::chrono::steady_clock::now();
+    std::set<uint32_t> live_ids;
+    uint32_t next_id;
+    {
+        std::shared_lock lock(mutex);
+        next_id = next_collection_id;
+        for(const auto& entry : collection_id_names) {
+            live_ids.insert(entry.first);
+        }
+    }
+
+    // Protect creations persisted before the snapshot but not yet registered in memory.
+    // scan_fill holds the Store lock for the scan, including iterator destruction.
+    std::vector<std::string> metadata;
+    store->scan_fill(std::string(Collection::COLLECTION_META_PREFIX) + "_",
+                     std::string(Collection::COLLECTION_META_PREFIX) + "`", metadata);
+    for(const auto& value : metadata) {
+        auto meta = nlohmann::json::parse(value, nullptr, false);
+        if(meta.is_discarded() || !meta.contains(Collection::COLLECTION_ID_KEY) ||
+           !meta[Collection::COLLECTION_ID_KEY].is_number_unsigned()) {
+            return Option<nlohmann::json>(500, "Invalid collection metadata while identifying dropped collections.");
+        }
+        live_ids.insert(meta[Collection::COLLECTION_ID_KEY].get<uint32_t>());
+    }
+    nlohmann::json response = {{"success", true}, {"dry_run", dry_run}, {"compact", compact},
+        {"dropped_id_count", 0}, {"ranges_processed", 0}, {"ranges_skipped_empty", 0},
+        {"ranges", nlohmann::json::array()},
+        {"size_estimate_source", "RocksDB GetApproximateSizes: SST byte estimates, not free disk"},
+        {"space_reclamation_note", "Space returns after this member's next Raft snapshot. Restarting before then "
+            "restores the old snapshot's hard-linked files; cleanup may need to run again."}};
+    if(compact) {
+        response["compaction_free_disk_floor_bytes"] = Store::COMPACTION_FREE_DISK_FLOOR_BYTES;
+    }
+    for(uint32_t id = 0; id < next_id; ++id) {
+        if(live_ids.count(id)) {
+            continue;
+        }
+        const auto begin = std::to_string(id) + "_", end = std::to_string(id) + "`";
+        auto estimate = store->get_approximate_range_size(begin, end);
+        if(!estimate.ok()) {
+            return Option<nlohmann::json>(estimate.code(), estimate.error());
+        }
+        response["ranges"].push_back({{"id", id}, {"begin", begin}, {"end", end},
+                                      {"approximate_sst_bytes", estimate.get()}});
+        LOG(INFO) << "Dropped collection cleanup id=" << id << " approximate_sst_bytes=" << estimate.get()
+                  << " dry_run=" << dry_run << " compact=" << compact;
+        if(!dry_run && estimate.get() == 0) {
+            response["ranges_skipped_empty"] = response["ranges_skipped_empty"].get<size_t>() + 1;
+        } else if(!dry_run) {
+            auto status = store->compact_dropped_range(begin, end, compact);
+            if(!status.ok()) {
+                LOG(ERROR) << "Dropped collection cleanup failed after " << response["ranges_processed"]
+                           << " ranges: " << status.ToString();
+                return Option<nlohmann::json>(500, status.ToString());
+            }
+            response["ranges_processed"] = response["ranges_processed"].get<size_t>() + 1;
+        }
+    }
+    if(response["ranges_processed"].get<size_t>() != 0) {
+        auto status = store->flush();
+        if(!status.ok()) {
+            return Option<nlohmann::json>(500, status.ToString());
+        }
+    }
+    response["dropped_id_count"] = response["ranges"].size();
+    response["duration_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    LOG(INFO) << "Dropped collection cleanup summary: dry_run=" << dry_run
+              << " ranges=" << response["dropped_id_count"] << " processed=" << response["ranges_processed"]
+              << " skipped_empty=" << response["ranges_skipped_empty"] << " duration_ms=" << response["duration_ms"];
+    return Option<nlohmann::json>(response);
 }
 
 std::string CollectionManager::get_symlink_key(const std::string & symlink_name) {

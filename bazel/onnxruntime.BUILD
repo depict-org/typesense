@@ -193,7 +193,7 @@ cmake(
     working_directory="cmake",
     build_args= [
         "--config Release",
-        "-j3"
+        "-j$$(nproc)"
     ],
     tags=["requires-network","no-sandbox"],
     features=["-default_compile_flags","-fno-canonical-system-headers", "-Wno-builtin-macro-redefined"],
