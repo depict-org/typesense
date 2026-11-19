@@ -77,7 +77,14 @@ TEST_F(CollectionSynonymsTest, SynonymReductionOnLongQueryKeepsCappedExpansions)
         tokens.push_back("root" + std::string(1, c));
     }
     std::vector<std::vector<std::string>> results;
-    ASSERT_TRUE(coll_mul_fields->synonym_reduction(tokens, "", results));
+    const auto begin_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    // A quadratic copying regression must hit this budget instead of passing slowly with enough RAM.
+    constexpr uint64_t budget_us = 5'000'000;
+    ASSERT_TRUE(coll_mul_fields->synonym_reduction(tokens, "", results, false, 0, {}, begin_us, budget_us));
+    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count() - begin_us;
+    ASSERT_LT(elapsed_us, budget_us);
     ASSERT_EQ(199, results.size());
 
     // Frozen from the legacy reducer on the nine-token tail, including its insertion-order cap.

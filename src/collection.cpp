@@ -2213,7 +2213,8 @@ Option<bool> Collection::init_index_search_args(collection_search_args_t& coll_a
         for(unsigned char byte : query) {
             query_length += (byte & 0xC0) != 0x80;
         }
-        if(query_length > max_query_length) {
+        // Bound malformed UTF-8 too: stray continuation bytes do not count as code points.
+        if(query_length > max_query_length || query.size() > 4ULL * max_query_length) {
             return Option<bool>(400, "`q` is " + std::to_string(query_length) +
                 " characters long; the maximum is " + std::to_string(max_query_length) +
                 " (server flag `max-query-length`).");

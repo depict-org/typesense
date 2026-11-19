@@ -96,6 +96,11 @@ TEST_F(CollectionSpecificMoreTest, QueryLongerThanMaxQueryLengthIsRejected) {
     ASSERT_EQ(rejected.error(), multi_results[0]["error"]);
     ASSERT_TRUE(multi_results[1].contains("hits"));
 
+    // URL-decoded q can contain invalid UTF-8, unlike JSON strings.
+    rejected = search(std::string(8001, char(0x80)));
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(400, rejected.code());
+
     config.set_max_query_length(0);
     ASSERT_TRUE(search(query + "ä").ok());
     collectionManager.drop_collection("query_length");
