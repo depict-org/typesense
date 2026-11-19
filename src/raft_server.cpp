@@ -1114,6 +1114,9 @@ nlohmann::json ReplicationState::get_status() {
         // `node` is not yet initialized (probably loading snapshot)
         status["state"] = "NOT_READY";
         status["committed_index"] = 0;
+        status["last_index"] = 0;
+        status["known_applied_index"] = 0;
+        status["applying_index"] = 0;
         status["queued_writes"] = 0;
         return status;
     }
@@ -1124,6 +1127,9 @@ nlohmann::json ReplicationState::get_status() {
 
     status["state"] = braft::state2str(node_status.state);
     status["committed_index"] = node_status.committed_index;
+    status["last_index"] = node_status.last_index;
+    status["known_applied_index"] = node_status.known_applied_index;
+    status["applying_index"] = node_status.applying_index;
     status["queued_writes"] = batched_indexer->get_queued_writes();
 
     return status;
