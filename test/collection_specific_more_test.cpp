@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <collection_manager.h>
 #include "collection.h"
+#include "core_api.h"
 #include "synonym_index.h"
 #include "synonym_index_manager.h"
 
@@ -47,6 +48,63 @@ protected:
         delete store;
     }
 };
+
+TEST_F(CollectionSpecificMoreTest, QueryLongerThanMaxQueryLengthIsRejected) {
+    // Paris P1 2026-11-19: reject pasted text before tokenization, counting UTF-8 code points.
+    auto& config = Config::get_instance();
+    const auto previous_limit = config.get_max_query_length();
+    struct RestoreLimit {
+        Config& config;
+        uint32_t limit;
+        ~RestoreLimit() { config.set_max_query_length(limit); }
+    } restore{config, previous_limit};
+    config.set_max_query_length(2000);
+
+    auto* coll = collectionManager.create_collection("query_length", 1,
+        {field("title", field_types::STRING, false)}).get();
+    auto search = [&](const std::string& q) {
+        return coll->search(q, {"title"}, "", {}, {}, {0}, 10, 1, FREQUENCY, {false}, 0);
+    };
+
+    std::string query;
+    for(size_t i = 0; i < 2000; ++i) {
+        query += "ä";
+    }
+    ASSERT_TRUE(search(query).ok());
+    auto rejected = search(query + "ä");
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(400, rejected.code());
+    ASSERT_EQ("`q` is 2001 characters long; the maximum is 2000 (server flag `max-query-length`).",
+              rejected.error());
+
+    // A NUL must not hide the rest of a query from the length check.
+    rejected = search(std::string(1, '\0') + query);
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(400, rejected.code());
+    auto req = std::make_shared<http_req>();
+    auto res = std::make_shared<http_res>(nullptr);
+    req->body = nlohmann::json({{"searches", {
+        {{"collection", "query_length"}, {"q", query + "ä"}, {"query_by", "title"}},
+        {{"collection", "query_length"}, {"q", "short"}, {"query_by", "title"}}
+    }}}).dump();
+    req->embedded_params_vec = {nlohmann::json::object(), nlohmann::json::object()};
+    ASSERT_TRUE(post_multi_search(req, res));
+    ASSERT_EQ(200, res->status_code);
+    const auto multi_results = nlohmann::json::parse(res->body)["results"];
+    ASSERT_EQ(2, multi_results.size());
+    ASSERT_EQ(400, multi_results[0]["code"]);
+    ASSERT_EQ(rejected.error(), multi_results[0]["error"]);
+    ASSERT_TRUE(multi_results[1].contains("hits"));
+
+    // URL-decoded q can contain invalid UTF-8, unlike JSON strings.
+    rejected = search(std::string(8001, char(0x80)));
+    ASSERT_FALSE(rejected.ok());
+    ASSERT_EQ(400, rejected.code());
+
+    config.set_max_query_length(0);
+    ASSERT_TRUE(search(query + "ä").ok());
+    collectionManager.drop_collection("query_length");
+}
 
 TEST_F(CollectionSpecificMoreTest, MaxCandidatesShouldBeRespected) {
     std::vector<field> fields = {field("company", field_types::STRING, true)};

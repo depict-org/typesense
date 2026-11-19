@@ -3,6 +3,7 @@
 #include <vector>
 #include <fstream>
 #include <algorithm>
+#include <chrono>
 #include <collection_manager.h>
 #include "collection.h"
 #include "synonym_index.h"
@@ -62,6 +63,55 @@ protected:
         delete store;
     }
 };
+
+TEST_F(CollectionSynonymsTest, SynonymReductionOnLongQueryKeepsCappedExpansions) {
+    // Paris P1: the old 1500-token DP took about 7 GiB; shared suffixes keep this linear.
+    for(char synonym_letter = 'a'; synonym_letter <= 'i'; ++synonym_letter) {
+        const auto suffix = std::string(1, synonym_letter);
+        nlohmann::json synonym = {{"id", "long-" + suffix},
+            {"synonyms", {"root" + suffix, "alt" + suffix, "other" + suffix}}};
+        ASSERT_TRUE(manager.upsert_synonym_item("index", synonym).ok());
+    }
+    std::vector<std::string> tokens(1491, "filler");
+    for(char synonym_letter = 'a'; synonym_letter <= 'i'; ++synonym_letter) {
+        tokens.push_back("root" + std::string(1, synonym_letter));
+    }
+    std::vector<std::vector<std::string>> results;
+    const auto begin_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    // A quadratic copying regression must hit this budget instead of passing slowly with enough RAM.
+    constexpr uint64_t budget_us = 5'000'000;
+    ASSERT_TRUE(coll_mul_fields->synonym_reduction(tokens, "", results, false, 0, {}, begin_us, budget_us));
+    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count() - begin_us;
+    ASSERT_LT(elapsed_us, budget_us);
+    ASSERT_EQ(199, results.size());
+
+    // Frozen from the legacy reducer on the nine-token tail, including its insertion-order cap.
+    const std::vector<std::pair<size_t, std::vector<std::string>>> expected = {
+        {0, {"roota", "rootb", "rootc", "rootd", "alte", "altf", "altg", "alth", "alti"}},
+        {100, {"roota", "rootb", "rootc", "rootd", "othere", "otherf", "otherg", "otherh", "otheri"}},
+        {198, {"roota", "rootb", "rootc", "rootd", "roote", "rootf", "rootg", "rooth", "otheri"}}
+    };
+    for(const auto& sample : expected) {
+        std::vector<std::string> expansion(1491, "filler");
+        expansion.insert(expansion.end(), sample.second.begin(), sample.second.end());
+        ASSERT_EQ(expansion, results[sample.first]);
+    }
+}
+
+TEST_F(CollectionSynonymsTest, SynonymReductionStopsAtSearchDeadline) {
+    // Paris P1: synonym work used to run past search_cutoff_ms without checking the clock.
+    nlohmann::json synonym = {{"id", "deadline"}, {"synonyms", {"root", "other"}}};
+    ASSERT_TRUE(manager.upsert_synonym_item("index", synonym).ok());
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::vector<std::vector<std::string>> results = {{"existing"}};
+    const auto original = results;
+    ASSERT_FALSE(coll_mul_fields->synonym_reduction(std::vector<std::string>(200, "root"), "",
+                 results, false, 0, {}, now_us - 1000000, 1));
+    ASSERT_EQ(original, results);
+}
 
 TEST_F(CollectionSynonymsTest, SynonymParsingFromJson) {
     nlohmann::json syn_json = {

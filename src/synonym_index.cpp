@@ -1,87 +1,144 @@
 #include "synonym_index.h"
 #include "posting.h"
+#include <chrono>
 
 
-void SynonymIndex::synonym_reduction(const std::vector<std::string>& tokens,
+bool SynonymIndex::synonym_reduction(const std::vector<std::string>& tokens,
                                      const std::string& locale,
                                      std::vector<std::vector<std::string>>& results,
                                      bool synonym_prefix,
-                                     uint32_t synonym_num_typos) const {
+                                     uint32_t synonym_num_typos,
+                                     uint64_t deadline_begin_us,
+                                     uint64_t deadline_budget_us) const {
     std::shared_lock lock(mutex);
     if (synonym_definitions.empty()) {
-        return;
+        return true;
     }
 
-    // hard cap to prevent run-away memory usage
-    constexpr std::size_t kMaxExpansionsPerCell = 200;
-    auto capped_insert = [&](std::set<std::vector<std::string>>& cell,
-                             std::vector<std::string>&& candidate) {
-        if (cell.size() < kMaxExpansionsPerCell) {
-            cell.insert(std::move(candidate));
-        }
+    auto expired = [&]() {
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        return uint64_t(now_us) - deadline_begin_us > deadline_budget_us;
     };
 
-    std::vector<std::set<std::vector<std::string>>> dp(tokens.size() + 1);
+    // Paris P1 2026-11-19: complete suffix copies made memory quadratic in query tokens.
+    // Owner: w28. Shared nodes keep the existing 200-per-cell cap and expansion order.
+    constexpr std::size_t kMaxExpansionsPerCell = 200;
+    constexpr uint32_t END = UINT32_MAX;
+    constexpr uint32_t NO_CELL = UINT32_MAX;
+    struct expansion_node_t {
+        const std::string* token;
+        uint32_t next;
+        uint32_t final_cell = NO_CELL;
+        uint32_t rank_in_cell = 0;
+    };
+    std::vector<expansion_node_t> nodes;
+    auto expansion_less = [&](uint32_t left, uint32_t right) {
+        while(left != right) {
+            if(left == END || right == END) {
+                return left == END;
+            }
+            const auto& left_node = nodes[left];
+            const auto& right_node = nodes[right];
+            if(left_node.final_cell != NO_CELL && left_node.final_cell == right_node.final_cell) {
+                return left_node.rank_in_cell < right_node.rank_in_cell;
+            }
+            const auto cmp = left_node.token->compare(*right_node.token);
+            if(cmp != 0) {
+                return cmp < 0;
+            }
+            left = left_node.next;
+            right = right_node.next;
+        }
+        return false;
+    };
+    using expansion_cell_t = std::set<uint32_t, decltype(expansion_less)>;
+    std::vector<expansion_cell_t> cells(tokens.size() + 1, expansion_cell_t(expansion_less));
     std::vector<std::vector<synonym_match_t>> synonym_matches(tokens.size());
-
-    for (std::size_t i = 0; i < tokens.size(); ++i) {
+    for(std::size_t i = 0; i < tokens.size(); ++i) {
+        if(expired()) {
+            return false;
+        }
         synonym_trie_root.get_synonyms(tokens, synonym_matches[i], synonym_num_typos, i, synonym_prefix);
     }
 
-    dp[tokens.size()] = {{}};
+    cells[tokens.size()].insert(END);
+    for(std::size_t i = tokens.size(); i-- > 0;) {
+        if(expired()) {
+            return false;
+        }
+        auto& cell = cells[i];
+        auto insert = [&](const std::vector<std::string>& phrase, uint32_t suffix) {
+            const auto mark = nodes.size();
+            for(auto it = phrase.rbegin(); it != phrase.rend(); ++it) {
+                nodes.push_back({&*it, suffix});
+                suffix = nodes.size() - 1;
+            }
+            if(!cell.insert(suffix).second) {
+                nodes.resize(mark);
+            }
+        };
 
-    for (int i = static_cast<int>(tokens.size()) - 1; i >= 0; --i) {
-        for (const auto& suffixExp: dp[i + 1]) {
-            std::vector<std::string> newExp;
-            newExp.reserve(1 + suffixExp.size());
-            newExp.push_back(tokens[i]);
-            newExp.insert(newExp.end(), suffixExp.begin(), suffixExp.end());
-            capped_insert(dp[i], std::move(newExp));
+        for(const auto suffix : cells[i + 1]) {
+            const auto head = nodes.size();
+            nodes.push_back({&tokens[i], suffix});
+            cell.insert(head);
         }
 
-        for (const auto& sm: synonym_matches[i]) {
+        for(const auto& sm : synonym_matches[i]) {
+            if(cell.size() == kMaxExpansionsPerCell) {
+                break;
+            }
             auto idxIt = synonym_ids_index_map.find(sm.synonym_id);
-            if (idxIt == synonym_ids_index_map.end()) {
+            if(idxIt == synonym_ids_index_map.end()) {
                 continue;
             }
-
             auto defIt = synonym_definitions.find(idxIt->second);
-            if (defIt == synonym_definitions.end()) {
+            if(defIt == synonym_definitions.end()) {
                 continue;
             }
-
             const auto& def = defIt->second;
-            if (def.locale != locale) {
+            if(def.locale != locale) {
                 continue;
             }
-
-            if (!def.root.empty()) {
-                std::vector<std::string> orig_tokens(tokens.begin() + sm.start_index,
-                                                     tokens.begin() + sm.end_index);
-                if (def.root != orig_tokens) {
-                    continue;
-                }
+            if(!def.root.empty() &&
+               (def.root.size() != sm.end_index - sm.start_index ||
+                !std::equal(def.root.begin(), def.root.end(), tokens.begin() + sm.start_index))) {
+                continue;
             }
-
-            std::size_t end_idx = sm.end_index;
-            for (const auto& suffixExp: dp[end_idx]) {
-                for (const auto& synTokens: def.synonyms) {
-                    std::vector<std::string> newExp;
-                    newExp.reserve(synTokens.size() + suffixExp.size());
-                    newExp.insert(newExp.end(), synTokens.begin(), synTokens.end());
-                    newExp.insert(newExp.end(), suffixExp.begin(), suffixExp.end());
-                    capped_insert(dp[i], std::move(newExp));
+            for(const auto suffix : cells[sm.end_index]) {
+                for(const auto& phrase : def.synonyms) {
+                    if(cell.size() == kMaxExpansionsPerCell) {
+                        break;
+                    }
+                    insert(phrase, suffix);
+                }
+                if(cell.size() == kMaxExpansionsPerCell) {
+                    break;
                 }
             }
         }
-    }
-
-    for (const auto& exp: dp[0]) {
-        // exclude original tokens
-        if (exp != tokens) {
-            results.push_back(exp);
+        uint32_t rank = 0;
+        for(const auto head : cell) {
+            // Empty phrases can reuse a head already ranked in another finished cell.
+            if(head != END && nodes[head].final_cell == NO_CELL) {
+                nodes[head].final_cell = i;
+                nodes[head].rank_in_cell = rank;
+            }
+            ++rank;
         }
     }
+
+    for(const auto head : cells[0]) {
+        std::vector<std::string> expansion;
+        for(auto node = head; node != END; node = nodes[node].next) {
+            expansion.push_back(*nodes[node].token);
+        }
+        if(expansion != tokens) {
+            results.push_back(std::move(expansion));
+        }
+    }
+    return true;
 }
 
 Option<bool> SynonymIndex::add_synonym(const synonym_t& synonym,

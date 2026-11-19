@@ -950,7 +950,10 @@ bool Collection::does_curation_match(const curation_t& curation, std::string& qu
             std::vector<std::vector<std::string>> results;
             std::vector<std::string> tokens;
             StringUtils::split(query, tokens, " ");
-            synonym_reduction(tokens, curation.rule.locale, results, synonym_prefix, synonym_num_typos);
+            if(!synonym_reduction(tokens, curation.rule.locale, results, synonym_prefix, synonym_num_typos,
+                                  {}, search_begin_us, search_stop_us)) {
+                search_cutoff = true;
+            }
 
             if(!results.empty()) {
                 int i = 0;
@@ -2202,6 +2205,20 @@ Option<bool> Collection::init_index_search_args(collection_search_args_t& coll_a
         }
         query = transcribe_res.get();
         transcribed_query = query;
+    }
+
+    const auto max_query_length = Config::get_instance().get_max_query_length();
+    if(max_query_length != 0) {
+        size_t query_length = 0;
+        for(unsigned char byte : query) {
+            query_length += (byte & 0xC0) != 0x80;
+        }
+        // Bound malformed UTF-8 too: stray continuation bytes do not count as code points.
+        if(query_length > max_query_length || query.size() > 4ULL * max_query_length) {
+            return Option<bool>(400, "`q` is " + std::to_string(query_length) +
+                " characters long; the maximum is " + std::to_string(max_query_length) +
+                " (server flag `max-query-length`).");
+        }
     }
 
     bool ignored_missing_fields = false;
@@ -6474,13 +6491,13 @@ Option<drop_tokens_param_t> Collection::parse_drop_tokens_mode(const std::string
     return Option<drop_tokens_param_t>(drop_tokens_param_t(drop_tokens_mode_val, drop_tokens_token_limit));
 }
 
-void Collection::synonym_reduction(const std::vector<std::string>& tokens,
+bool Collection::synonym_reduction(const std::vector<std::string>& tokens,
                                      const std::string& locale,
                                      std::vector<std::vector<std::string>>& results,
                                      bool synonym_prefix, uint32_t synonym_num_typos,
-                                     const std::vector<std::string>& param_synonym_sets) const {
+                                     const std::vector<std::string>& param_synonym_sets,
+                                     uint64_t deadline_begin_us, uint64_t deadline_budget_us) const {
     std::shared_lock lock(mutex);
-    //return synonym_index->synonym_reduction(tokens, locale, results, synonym_prefix, synonym_num_typos);
     // Merge with the existing synonym sets
     std::unordered_set<std::string> synonym_sets_merged(synonym_sets.begin(), synonym_sets.end());
     for(const auto& param_synonym_set : param_synonym_sets) {
@@ -6496,8 +6513,12 @@ void Collection::synonym_reduction(const std::vector<std::string>& tokens,
             continue;
         }
         auto synonym_index = synonym_index_op.get();
-        synonym_index->synonym_reduction(tokens, locale, results, synonym_prefix, synonym_num_typos);
+        if(!synonym_index->synonym_reduction(tokens, locale, results, synonym_prefix, synonym_num_typos,
+                                             deadline_begin_us, deadline_budget_us)) {
+            return false;
+        }
     }
+    return true;
 }
 
 spp::sparse_hash_map<std::string, reference_info_t> Collection::get_reference_fields() {

@@ -89,6 +89,7 @@ private:
     uint16_t filter_by_max_ops;
   
     uint32_t max_group_limit;
+    uint32_t max_query_length;
 
     uint32_t db_write_buffer_size;
 
@@ -148,6 +149,11 @@ protected:
         this->filter_by_max_ops = FILTER_BY_DEFAULT_OPERATIONS;
         
         this->max_group_limit = 99;
+        // Paris P1 2026-11-19 14:03Z: pasted queries exhausted synonym memory. Owner: w28.
+        // 2000 backs up Runway's 1000 cap, allowing title-leg case folding to lengthen q.
+        // Owner: w28. Delete the default (set 0) when a 135,000-character query measures under 1 GiB extra
+        // memory and inside the search cutoff on one member with this build.
+        this->max_query_length = 2000;
 
         //for rocksdb
         this->db_write_buffer_size = 4*1048576;
@@ -312,6 +318,10 @@ public:
 
     void set_max_group_limit(uint32_t max_group_limit) {
         this->max_group_limit = max_group_limit;
+    }
+
+    void set_max_query_length(uint32_t max_query_length) {
+        this->max_query_length = max_query_length;
     }
 
     // getters
@@ -506,6 +516,10 @@ public:
 
     uint16_t get_filter_by_max_ops() const {
         return filter_by_max_ops;
+    }
+
+    uint32_t get_max_query_length() const {
+        return this->max_query_length;
     }
 
     uint32_t get_max_group_limit() const {

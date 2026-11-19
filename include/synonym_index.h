@@ -155,10 +155,12 @@ public:
 
     static std::string get_synonym_key(const std::string & index_name, const std::string & synonym_id);
 
-    void synonym_reduction(const std::vector<std::string>& tokens,
+    bool synonym_reduction(const std::vector<std::string>& tokens,
                            const std::string& locale,
                            std::vector<std::vector<std::string>>& results,
-                           bool synonym_prefix, uint32_t synonym_num_typos) const;
+                           bool synonym_prefix, uint32_t synonym_num_typos,
+                           uint64_t deadline_begin_us = 0,
+                           uint64_t deadline_budget_us = UINT64_MAX) const;
 
     Option<std::map<uint32_t, synonym_t*>> get_synonyms(uint32_t limit=0, uint32_t offset=0);
 

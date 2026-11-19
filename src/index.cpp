@@ -3952,9 +3952,12 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                 if(!synonym_index_op.ok()) {
                     return Option<bool>(400, "Could not find synonym index `" + synonym_index_name + "`");
                 }
-                synonym_index_op.get()->synonym_reduction(q_include_tokens, search_field_it->locale,
+                if(!synonym_index_op.get()->synonym_reduction(q_include_tokens, search_field_it->locale,
                                              field_query_tokens[0].q_synonyms,
-                                             synonym_prefix, synonym_num_typos);
+                                             synonym_prefix, synonym_num_typos, search_begin_us, search_stop_us)) {
+                    search_cutoff = true;
+                    break;
+                }
             }
         }
 
