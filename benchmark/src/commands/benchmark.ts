@@ -860,6 +860,11 @@ class Benchmarks {
   perform() {
     logger.info("Running benchmarks");
 
+    if (this.commitHashes[0] === this.commitHashes[1]) {
+      logger.info(`Both commit hashes are ${this.commitHashes[0]}; running one benchmark pass without comparison.`);
+      return this.startContainers().andThen(() => this.performBenchmarks([this.commitHashes[0]]));
+    }
+
     return this.startContainers()
       .andThen(() =>
         this.getComparisonResults()
