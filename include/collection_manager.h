@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <string>
+#include <functional>
 #include <sparsepp.h>
 #include "store.h"
 #include "field.h"
@@ -148,7 +149,8 @@ public:
 
     uint32_t get_next_collection_id() const;
 
-    Option<nlohmann::json> compact_dropped_collections(bool dry_run = false, bool compact = false);
+    Option<nlohmann::json> compact_dropped_collections(bool dry_run = false, bool compact = false,
+        const std::function<void()>& after_plan = {});
 
     static std::string get_symlink_key(const std::string & symlink_name);
 

@@ -964,7 +964,8 @@ uint32_t CollectionManager::get_next_collection_id() const {
     return next_collection_id;
 }
 
-Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_run, bool compact) {
+Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_run, bool compact,
+        const std::function<void()>& after_plan) {
     static std::mutex operation_mutex;
     std::unique_lock flight(operation_mutex, std::try_to_lock);
     if(!flight.owns_lock()) {
@@ -994,6 +995,7 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
         }
         live_ids.insert(meta[Collection::COLLECTION_ID_KEY].get<uint32_t>());
     }
+    if(after_plan) { after_plan(); } // Test-only hook to load a snapshot after planning.
     nlohmann::json response = {{"success", true}, {"dry_run", dry_run}, {"compact", compact},
         {"dropped_id_count", 0}, {"ranges_processed", 0}, {"ranges_skipped_empty", 0},
         {"ranges", nlohmann::json::array()},
