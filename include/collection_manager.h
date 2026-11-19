@@ -21,6 +21,7 @@ private:
 
     Store *store;
     ThreadPool* thread_pool;
+    ThreadPool* replication_thread_pool = nullptr;
 
     AuthManager auth_manager;
 
@@ -106,7 +107,8 @@ public:
 
     void init(Store *store, ThreadPool* thread_pool, const float max_memory_ratio,
               const std::string & auth_key, std::atomic<bool>& quit,
-              const uint16_t& filter_by_max_operations = Config::FILTER_BY_DEFAULT_OPERATIONS);
+              const uint16_t& filter_by_max_operations = Config::FILTER_BY_DEFAULT_OPERATIONS,
+              ThreadPool* replication_thread_pool = nullptr);
 
     // only for tests!
     void init(Store *store, const float max_memory_ratio, const std::string & auth_key, std::atomic<bool>& exit,
