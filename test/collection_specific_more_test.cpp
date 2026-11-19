@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <collection_manager.h>
 #include "collection.h"
+#include "core_api.h"
 #include "synonym_index.h"
 #include "synonym_index_manager.h"
 
@@ -80,6 +81,21 @@ TEST_F(CollectionSpecificMoreTest, QueryLongerThanMaxQueryLengthIsRejected) {
     rejected = search(std::string(1, '\0') + query);
     ASSERT_FALSE(rejected.ok());
     ASSERT_EQ(400, rejected.code());
+    auto req = std::make_shared<http_req>();
+    auto res = std::make_shared<http_res>(nullptr);
+    req->body = nlohmann::json({{"searches", {
+        {{"collection", "query_length"}, {"q", query + "ä"}, {"query_by", "title"}},
+        {{"collection", "query_length"}, {"q", "short"}, {"query_by", "title"}}
+    }}}).dump();
+    req->embedded_params_vec = {nlohmann::json::object(), nlohmann::json::object()};
+    ASSERT_TRUE(post_multi_search(req, res));
+    ASSERT_EQ(200, res->status_code);
+    const auto multi_results = nlohmann::json::parse(res->body)["results"];
+    ASSERT_EQ(2, multi_results.size());
+    ASSERT_EQ(400, multi_results[0]["code"]);
+    ASSERT_EQ(rejected.error(), multi_results[0]["error"]);
+    ASSERT_TRUE(multi_results[1].contains("hits"));
+
     config.set_max_query_length(0);
     ASSERT_TRUE(search(query + "ä").ok());
     collectionManager.drop_collection("query_length");

@@ -1073,11 +1073,13 @@ public:
     Option<bool> set_synonym_sets(const std::vector<std::string>& synonym_sets);
     Option<bool> set_curation_sets(const std::vector<std::string>& curation_sets);
     
-    void synonym_reduction(const std::vector<std::string>& tokens,
+    bool synonym_reduction(const std::vector<std::string>& tokens,
                            const std::string& locale,
                            std::vector<std::vector<std::string>>& results,
                            bool synonym_prefix = false, uint32_t synonym_num_typos = 0,
-                           const std::vector<std::string>& = {}) const;
+                           const std::vector<std::string>& = {},
+                           uint64_t deadline_begin_us = 0,
+                           uint64_t deadline_budget_us = UINT64_MAX) const;
 
     spp::sparse_hash_map<std::string, reference_info_t> get_reference_fields();
 
