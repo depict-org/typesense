@@ -219,41 +219,10 @@ export class K6Benchmarks {
       return errAsync(process.error);
     }
 
-    const create = async () => {
-      // Use a bounded request: the SDK client retries 503s for several minutes.
-      const deadline = Date.now() + 60_000;
-      let lastStatus = "no health response";
-      let ready = false;
-      while (!ready && Date.now() < deadline) {
-        try {
-          const response = await fetch(`http://localhost:${this.config.port}/health`, {
-            signal: AbortSignal.timeout(Math.min(1_000, deadline - Date.now())),
-          });
-          lastStatus = `HTTP ${response.status}`;
-          ready = response.ok && ((await response.json()) as { ok?: boolean }).ok === true;
-        } catch (error) {
-          lastStatus = toErrorWithMessage(error).message;
-        }
-        if (!ready) await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-      if (!ready) {
-        throw new Error(`Typesense on port ${this.config.port} not ready after 60s; last status: ${lastStatus}`);
-      }
-
-      const client = process.value.client;
-      try {
-        await client.collections().create(K6Benchmarks.COLLECTION_SCHEMA);
-      } catch (error) {
-        if (!(error instanceof Error) || !("httpStatus" in error) || error.httpStatus !== 409) throw error;
-        const existing = await client.collections(K6Benchmarks.COLLECTION_NAME).retrieve();
-        // CI uses a fresh data directory, so a conflict is our own retried create.
-        if (existing.num_documents !== 0) {
-          throw new Error("Benchmark collection songs already exists and is not empty; use a clean data directory");
-        }
-      }
-    };
-
-    return ResultAsync.fromPromise(create(), toErrorWithMessage).map(() => {
+    return ResultAsync.fromPromise(
+      process.value.client.collections().create(K6Benchmarks.COLLECTION_SCHEMA),
+      toErrorWithMessage,
+    ).map(() => {
       this.config.spinner.succeed("Benchmark collection created");
     });
   }
