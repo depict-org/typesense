@@ -29,33 +29,26 @@ jobs:
           echo "Is fork: $IS_FORK"
           if [ "$IS_FORK" = "true" ]; then
             echo "This is a fork of $PARENT_REPO"
-            # For forks, get successful runs from the current repo
             REPO_TO_CHECK="${{ github.repository }}"
           else
             echo "This is the main repo"
-            # For main repo, get successful runs from main branch
             REPO_TO_CHECK="${{ github.repository }}"
-            BRANCH_FILTER="and .head_branch == \"$DEFAULT_BRANCH\""
           fi
 
           echo "Fetching workflow runs from $REPO_TO_CHECK..."
-          if [ "$IS_FORK" = "true" ]; then
-            RUNS_INFO=$(gh api -H "Accept: application/vnd.github+json" \
-              /repos/$REPO_TO_CHECK/actions/workflows/tests.yml/runs \
-              -q '.workflow_runs[] | select(.conclusion == "success") | {id: .id, sha: .head_sha, branch: .head_branch, conclusion: .conclusion}' \
-              --paginate | head -n 2)
-          else
-            RUNS_INFO=$(gh api -H "Accept: application/vnd.github+json" \
-              /repos/$REPO_TO_CHECK/actions/workflows/tests.yml/runs \
-              -q ".workflow_runs[] | select(.conclusion == \"success\" and .head_branch == \"$DEFAULT_BRANCH\") | {id: .id, sha: .head_sha, branch: .head_branch, conclusion: .conclusion}" \
-              --paginate | head -n 2)
-          fi
+          RUNS_INFO=$(gh api -H "Accept: application/vnd.github+json" \
+            "/repos/$REPO_TO_CHECK/actions/workflows/tests.yml/runs?branch=$DEFAULT_BRANCH&event=push&status=success&per_page=50" | \
+            jq -sc --arg branch "$DEFAULT_BRANCH" '
+              [.[].workflow_runs[] | select(.conclusion == "success" and .head_branch == $branch and .event == "push")]
+              | reduce .[] as $run ([];
+                  if length < 2 and all(.[]; .head_sha != $run.head_sha) then . + [$run] else . end)
+              | .[] | {id: .id, sha: .head_sha, branch: .head_branch, conclusion: .conclusion}')
           
           echo "Found runs info:"
           echo "$RUNS_INFO"
           
-          if [ -z "$RUNS_INFO" ]; then
-            echo "No successful runs found"
+          if [ "$(echo "$RUNS_INFO" | jq -s 'length')" -lt 2 ]; then
+            echo "Need two successful push runs on $DEFAULT_BRANCH with distinct SHAs"
             exit 1
           fi
           
