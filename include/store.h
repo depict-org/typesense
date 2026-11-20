@@ -96,7 +96,7 @@ public:
 
     rocksdb::Iterator* get_iterator();
 
-    void scan_fill(const std::string& prefix_start, const std::string& prefix_end, std::vector<std::string> & values);
+    rocksdb::Status scan_fill(const std::string& prefix_start, const std::string& prefix_end, std::vector<std::string> & values);
 
     void increment(const std::string & key, uint32_t value);
 

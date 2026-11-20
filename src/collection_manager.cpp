@@ -982,8 +982,11 @@ Option<nlohmann::json> CollectionManager::compact_dropped_collections(bool dry_r
     std::set<uint32_t> live_ids;
     // Build the plan from the Store; in-memory IDs may belong to the pre-reload database.
     std::vector<std::string> metadata;
-    store->scan_fill(std::string(Collection::COLLECTION_META_PREFIX) + "_",
-                     std::string(Collection::COLLECTION_META_PREFIX) + "`", metadata);
+    auto scan_status = store->scan_fill(std::string(Collection::COLLECTION_META_PREFIX) + "_",
+                                      std::string(Collection::COLLECTION_META_PREFIX) + "`", metadata);
+    if(!scan_status.ok()) {
+        return Option<nlohmann::json>(500, "metadata scan failed; nothing deleted");
+    }
     for(const auto& value : metadata) {
         auto meta = nlohmann::json::parse(value, nullptr, false);
         if(meta.is_discarded() || !meta.contains(Collection::COLLECTION_ID_KEY) ||

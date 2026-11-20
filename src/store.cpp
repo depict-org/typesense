@@ -136,7 +136,7 @@ rocksdb::Iterator* Store::get_iterator() {
     return it;
 }
 
-void Store::scan_fill(const std::string& prefix_start, const std::string& prefix_end, std::vector<std::string> & values) {
+rocksdb::Status Store::scan_fill(const std::string& prefix_start, const std::string& prefix_end, std::vector<std::string> & values) {
     rocksdb::ReadOptions read_opts;
     rocksdb::Slice upper_bound(prefix_end);
     read_opts.iterate_upper_bound = &upper_bound;
@@ -147,7 +147,9 @@ void Store::scan_fill(const std::string& prefix_start, const std::string& prefix
         values.push_back(iter->value().ToString());
     }
 
+    auto status = iter->status();
     delete iter;
+    return status;
 }
 
 void Store::increment(const std::string & key, uint32_t value) {
