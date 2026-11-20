@@ -1,6 +1,5 @@
 #include "include/store.h"
 #include <rocksdb/convenience.h>
-#include <sys/statvfs.h>
 
 Store::Store(const std::string & state_dir_path, const size_t wal_ttl_secs, const size_t wal_size_mb, bool disable_wal,
              int32_t ttl, size_t write_buffer_size,size_t max_write_buffer_number, size_t max_log_file_size,
@@ -137,7 +136,7 @@ rocksdb::Iterator* Store::get_iterator() {
     return it;
 }
 
-void Store::scan_fill(const std::string& prefix_start, const std::string& prefix_end, std::vector<std::string> & values) {
+rocksdb::Status Store::scan_fill(const std::string& prefix_start, const std::string& prefix_end, std::vector<std::string> & values) {
     rocksdb::ReadOptions read_opts;
     rocksdb::Slice upper_bound(prefix_end);
     read_opts.iterate_upper_bound = &upper_bound;
@@ -148,7 +147,9 @@ void Store::scan_fill(const std::string& prefix_start, const std::string& prefix
         values.push_back(iter->value().ToString());
     }
 
+    auto status = iter->status();
     delete iter;
+    return status;
 }
 
 void Store::increment(const std::string & key, uint32_t value) {
@@ -233,6 +234,7 @@ void Store::close() {
 
 int Store::reload(bool clear_state_dir, const std::string& snapshot_path, int32_t ttl) {
     std::unique_lock lock(mutex);
+    ++reload_count;
 
     // we don't use close() to avoid nested lock and because lock is required until db is re-initialized
     delete db;
@@ -313,27 +315,24 @@ rocksdb::Status Store::compact_range(const rocksdb::Slice& begin_key, const rock
 }
 
 rocksdb::Status Store::compact_dropped_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key,
-                                            bool compact) {
+                                            uint64_t expected_reload_count) {
     std::shared_lock lock(mutex);
-    if(compact) {
-        struct statvfs fs;
-        if(statvfs(state_dir_path.c_str(), &fs) != 0) {
-            return rocksdb::Status::IOError("Could not determine free disk space for compaction.");
-        }
-        if(uint64_t(fs.f_bavail) * fs.f_frsize < COMPACTION_FREE_DISK_FLOOR_BYTES) {
-            return rocksdb::Status::IOError("Compaction requires at least 64 GiB free before each range.");
-        }
+    if(reload_count != expected_reload_count) {
+        return rocksdb::Status::Aborted("store reloaded during cleanup; run again");
     }
+    rocksdb::Range range(begin_key, end_key);
+    uint64_t bytes_before = 0, bytes_after = 0;
+    const bool measured_before = db->GetApproximateSizes(&range, 1, &bytes_before).ok();
     auto status = rocksdb::DeleteFilesInRange(db, db->DefaultColumnFamily(), &begin_key, &end_key, false);
     if(!status.ok()) {
         return status;
     }
-    // Deleted files can contain tombstones hiding older keys in mixed SSTs that survived.
-    status = db->DeleteRange(write_options, db->DefaultColumnFamily(), begin_key, end_key);
-    if(!status.ok()) {
-        return status;
+    // No file was deleted, so existing tombstones still cover the remaining keys.
+    if(measured_before && db->GetApproximateSizes(&range, 1, &bytes_after).ok() && bytes_after == bytes_before) {
+        return rocksdb::Status::OK();
     }
-    return compact ? db->CompactRange(rocksdb::CompactRangeOptions(), &begin_key, &end_key) : rocksdb::Status::OK();
+    // Deleted files can contain tombstones hiding older keys in mixed SSTs that survived.
+    return db->DeleteRange(write_options, db->DefaultColumnFamily(), begin_key, end_key);
 }
 
 Option<uint64_t> Store::get_approximate_range_size(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) const {

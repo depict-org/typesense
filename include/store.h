@@ -62,6 +62,7 @@ private:
     // Used to protect assignment to DB handle, which is otherwise thread safe
     // So we use unique lock only for assignment, but shared locks for all other operations on DB
     mutable std::shared_mutex mutex;
+    uint64_t reload_count = 0;
 
     rocksdb::Status init_db(int32_t ttl);
 
@@ -95,7 +96,7 @@ public:
 
     rocksdb::Iterator* get_iterator();
 
-    void scan_fill(const std::string& prefix_start, const std::string& prefix_end, std::vector<std::string> & values);
+    rocksdb::Status scan_fill(const std::string& prefix_start, const std::string& prefix_end, std::vector<std::string> & values);
 
     void increment(const std::string & key, uint32_t value);
 
@@ -107,6 +108,11 @@ public:
 
     int reload(bool clear_state_dir, const std::string& snapshot_path, int32_t ttl = 0);
 
+    uint64_t get_reload_count() const {
+        std::shared_lock lock(mutex);
+        return reload_count;
+    }
+
     rocksdb::Status flush();
 
     rocksdb::Status compact_all();
@@ -117,10 +123,8 @@ public:
 
     rocksdb::Status compact_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key);
 
-    static constexpr uint64_t COMPACTION_FREE_DISK_FLOOR_BYTES = 64ULL * 1024 * 1024 * 1024;
-
     rocksdb::Status compact_dropped_range(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key,
-                                          bool compact = false);
+                                          uint64_t expected_reload_count);
 
     Option<uint64_t> get_approximate_range_size(const rocksdb::Slice& begin_key, const rocksdb::Slice& end_key) const;
 

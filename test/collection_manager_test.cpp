@@ -93,6 +93,50 @@ protected:
     }
 };
 
+TEST_F(CollectionManagerTest, CompactDroppedAbortsWhenSnapshotLoadsMidPass) {
+    const auto snapshot_path = store->get_state_dir_path() + "_reload_snapshot";
+    system(("rm -rf " + snapshot_path).c_str());
+    std::string live_file;
+    {
+        Store snapshot_store(snapshot_path);
+        ASSERT_TRUE(snapshot_store.insert(CollectionManager::NEXT_COLLECTION_ID_KEY, "1"));
+        ASSERT_TRUE(snapshot_store.insert(Collection::get_meta_key("snapshot_live"), R"({"id":0})"));
+        ASSERT_TRUE(snapshot_store.flush().ok());
+        ASSERT_TRUE(snapshot_store.compact_all().ok());
+        ASSERT_TRUE(snapshot_store.insert("0_live", "keep"));
+        ASSERT_TRUE(snapshot_store.flush().ok());
+        auto snapshot_db = snapshot_store._get_db_unsafe();
+        rocksdb::ColumnFamilyMetaData metadata;
+        snapshot_db->GetColumnFamilyMetaData(&metadata);
+        std::vector<std::string> files;
+        for(const auto& file : metadata.levels[0].files) { files.push_back(file.name); }
+        ASSERT_TRUE(snapshot_db->CompactFiles({}, files, 1).ok());
+        snapshot_db->GetColumnFamilyMetaData(&metadata);
+        for(const auto& file : metadata.levels[1].files) {
+            if(file.smallestkey == "0_live" && file.largestkey == "0_live") { live_file = file.name; }
+        }
+        ASSERT_FALSE(live_file.empty());
+    }
+    ASSERT_TRUE(collectionManager.drop_collection("collection1", true, false).ok());
+    auto op = collectionManager.compact_dropped_collections(false, [&] {
+        ASSERT_EQ(0, store->reload(true, snapshot_path));
+    });
+    EXPECT_FALSE(op.ok());
+    EXPECT_EQ(409, op.code());
+    EXPECT_EQ("store reloaded during cleanup; run again", op.error());
+    std::string value;
+    EXPECT_EQ(StoreStatus::FOUND, store->get("0_live", value));
+    EXPECT_EQ("keep", value);
+    rocksdb::ColumnFamilyMetaData metadata;
+    store->_get_db_unsafe()->GetColumnFamilyMetaData(&metadata);
+    std::set<std::string> remaining_files;
+    for(const auto& level : metadata.levels) {
+        for(const auto& file : level.files) { remaining_files.insert(file.name); }
+    }
+    EXPECT_EQ(1, remaining_files.count(live_file));
+    system(("rm -rf " + snapshot_path).c_str());
+}
+
 TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     const std::vector<field> fields = {field("title", field_types::STRING, false)};
     auto live_op = collectionManager.create_collection("live", 1, fields);
@@ -203,6 +247,11 @@ TEST_F(CollectionManagerTest, CompactDroppedCollections) {
     ASSERT_TRUE(search.ok()) << search.error();
     ASSERT_EQ(1, recreated.get()->get_num_documents());
     ASSERT_EQ(1, search.get()["found"]);
+
+    const auto sequence_after_cleanup = db->GetLatestSequenceNumber();
+    op = collectionManager.compact_dropped_collections();
+    ASSERT_TRUE(op.ok()) << op.error();
+    EXPECT_EQ(sequence_after_cleanup, db->GetLatestSequenceNumber());
 }
 
 TEST_F(CollectionManagerTest, CollectionCreation) {
